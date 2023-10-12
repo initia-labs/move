@@ -113,13 +113,13 @@ pub fn shortest_cycle<'a, T: Ord + Hash>(
             );
             match (shortest_path, path_opt) {
                 (p, None) | (None, p) => p,
-                (Some((acc_len, acc_path)), Some((cur_len, cur_path))) => Some(
-                    if cur_len < acc_len {
+                (Some((acc_len, acc_path)), Some((cur_len, cur_path))) => {
+                    Some(if cur_len < acc_len {
                         (cur_len, cur_path)
                     } else {
                         (acc_len, acc_path)
-                    },
-                ),
+                    })
+                }
             }
         });
     let (_, mut path) = shortest_path.unwrap();
@@ -519,6 +519,7 @@ pub mod known_attributes {
         Verification(VerificationAttribute),
         Native(NativeAttribute),
         Deprecation(DeprecationAttribute),
+        View(ViewAttribute),
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -550,6 +551,12 @@ pub mod known_attributes {
         Deprecated,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum ViewAttribute {
+        // Marks the function as view function
+        View,
+    }
+
     impl fmt::Display for AttributePosition {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
@@ -573,17 +580,17 @@ pub mod known_attributes {
                 TestingAttribute::TEST_ONLY => Self::Testing(TestingAttribute::TestOnly),
                 TestingAttribute::EXPECTED_FAILURE => {
                     Self::Testing(TestingAttribute::ExpectedFailure)
-                },
+                }
                 VerificationAttribute::VERIFY_ONLY => {
                     Self::Verification(VerificationAttribute::VerifyOnly)
-                },
+                }
                 NativeAttribute::BYTECODE_INSTRUCTION => {
                     Self::Native(NativeAttribute::BytecodeInstruction)
-                },
+                }
                 NativeAttribute::NATIVE_INTERFACE => Self::Native(NativeAttribute::NativeInterface),
                 DeprecationAttribute::DEPRECATED_NAME => {
                     Self::Deprecation(DeprecationAttribute::Deprecated)
-                },
+                }
                 _ => return None,
             })
         }
@@ -604,6 +611,7 @@ pub mod known_attributes {
             VerificationAttribute::add_attribute_names(table);
             NativeAttribute::add_attribute_names(table);
             DeprecationAttribute::add_attribute_names(table);
+            ViewAttribute::add_attribute_names(table);
         }
 
         fn name(&self) -> &str {
@@ -612,6 +620,7 @@ pub mod known_attributes {
                 Self::Verification(a) => a.name(),
                 Self::Native(a) => a.name(),
                 Self::Deprecation(a) => a.name(),
+                Self::View(a) => a.name(),
             }
         }
 
@@ -621,6 +630,7 @@ pub mod known_attributes {
                 Self::Verification(a) => a.expected_positions(),
                 Self::Native(a) => a.expected_positions(),
                 Self::Deprecation(a) => a.expected_positions(),
+                Self::View(a) => a.expected_positions(),
             }
         }
     }
@@ -685,6 +695,33 @@ pub mod known_attributes {
                 TestingAttribute::TestOnly => &TEST_ONLY_POSITIONS,
                 TestingAttribute::Test => &TEST_POSITIONS,
                 TestingAttribute::ExpectedFailure => &EXPECTED_FAILURE_POSITIONS,
+            }
+        }
+    }
+
+    impl ViewAttribute {
+        const ALL_ATTRIBUTE_NAMES: [&'static str; 1] = [Self::VIEW_NAME];
+        pub const VIEW_NAME: &'static str = "view";
+    }
+
+    impl AttributeKind for ViewAttribute {
+        fn add_attribute_names(table: &mut BTreeSet<String>) {
+            for str in Self::ALL_ATTRIBUTE_NAMES {
+                table.insert(str.to_string());
+            }
+        }
+
+        fn name(&self) -> &str {
+            match self {
+                Self::View => Self::VIEW_NAME,
+            }
+        }
+
+        fn expected_positions(&self) -> &'static BTreeSet<AttributePosition> {
+            static VIEW_POSITIONS: Lazy<BTreeSet<AttributePosition>> =
+                Lazy::new(|| IntoIterator::into_iter([AttributePosition::Function]).collect());
+            match self {
+                Self::View => &VIEW_POSITIONS,
             }
         }
     }

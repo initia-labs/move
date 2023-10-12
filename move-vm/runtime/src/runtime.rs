@@ -77,7 +77,7 @@ impl VMRuntime {
                         "[VM] module deserialization failed".to_string(),
                     )
                     .finish(Location::Undefined));
-            },
+            }
         };
 
         // Make sure all modules' self addresses matches the transaction sender. The self address is
@@ -198,7 +198,7 @@ impl VMRuntime {
                     StatusCode::INVALID_PARAM_TYPE_FOR_DESERIALIZATION,
                 )
                 .with_message("[VM] failed to get layout from type".to_string()));
-            },
+            }
         };
 
         match Value::simple_deserialize(arg.borrow(), &layout) {
@@ -245,7 +245,7 @@ impl VMRuntime {
                             .enable_invariant_violation_check_in_swap_loc,
                     )?;
                     dummy_locals.borrow_loc(idx)
-                },
+                }
                 _ => self.deserialize_value(&arg_ty, arg_bytes),
             })
             .collect::<PartialVMResult<Vec<_>>>()?;
@@ -266,7 +266,7 @@ impl VMRuntime {
                 })?;
                 let inner_value = ref_value.read_ref()?;
                 (&**inner, inner_value)
-            },
+            }
             _ => (ty, value),
         };
 
@@ -279,7 +279,19 @@ impl VMRuntime {
             PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                 .with_message("failed to serialize return values".to_string())
         })?;
-        Ok((bytes, layout))
+
+        // INITIA CUSTOM
+        // for serialization
+        let layout_for_return = self
+            .loader
+            .type_to_fully_annotated_layout(ty)
+            .map_err(|_err| {
+                PartialVMError::new(StatusCode::VERIFICATION_ERROR).with_message(
+                    "entry point functions cannot have non-serializable return types".to_string(),
+                )
+            })?;
+
+        Ok((bytes, layout_for_return))
     }
 
     fn serialize_return_values(
