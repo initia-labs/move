@@ -244,7 +244,8 @@ fn test_attributes(attrs: &P::Attributes) -> Vec<(Loc, known_attributes::Testing
                 KnownAttribute::Verification(_)
                 | KnownAttribute::Native(_)
                 | KnownAttribute::Deprecation(_)
-                | KnownAttribute::View(_) => None,
+                | KnownAttribute::View(_)
+                | KnownAttribute::Event(_) => None,
             },
         )
         .collect()

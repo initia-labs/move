@@ -608,6 +608,7 @@ pub mod known_attributes {
         Native(NativeAttribute),
         Deprecation(DeprecationAttribute),
         View(ViewAttribute),
+        Event(EventAttribute),
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -643,6 +644,12 @@ pub mod known_attributes {
     pub enum ViewAttribute {
         // Marks the function as view function
         View,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum EventAttribute {
+        // Marks the function as view function
+        Event,
     }
 
     impl fmt::Display for AttributePosition {
@@ -700,6 +707,7 @@ pub mod known_attributes {
             NativeAttribute::add_attribute_names(table);
             DeprecationAttribute::add_attribute_names(table);
             ViewAttribute::add_attribute_names(table);
+            EventAttribute::add_attribute_names(table);
         }
 
         fn name(&self) -> &str {
@@ -709,6 +717,7 @@ pub mod known_attributes {
                 Self::Native(a) => a.name(),
                 Self::Deprecation(a) => a.name(),
                 Self::View(a) => a.name(),
+                Self::Event(a) => a.name(),
             }
         }
 
@@ -719,6 +728,7 @@ pub mod known_attributes {
                 Self::Native(a) => a.expected_positions(),
                 Self::Deprecation(a) => a.expected_positions(),
                 Self::View(a) => a.expected_positions(),
+                Self::Event(a) => a.expected_positions(),
             }
         }
     }
@@ -913,6 +923,33 @@ pub mod known_attributes {
             });
             match self {
                 Self::Deprecated => &DEPRECATED_POSITIONS,
+            }
+        }
+    }
+
+    impl EventAttribute {
+        const ALL_ATTRIBUTE_NAMES: [&'static str; 1] = [Self::EVENT_NAME];
+        pub const EVENT_NAME: &'static str = "event";
+    }
+
+    impl AttributeKind for EventAttribute {
+        fn add_attribute_names(table: &mut BTreeSet<String>) {
+            for str in Self::ALL_ATTRIBUTE_NAMES {
+                table.insert(str.to_string());
+            }
+        }
+
+        fn name(&self) -> &str {
+            match self {
+                Self::Event => Self::EVENT_NAME,
+            }
+        }
+
+        fn expected_positions(&self) -> &'static BTreeSet<AttributePosition> {
+            static EVENT_POSITIONS: Lazy<BTreeSet<AttributePosition>> =
+                Lazy::new(|| IntoIterator::into_iter([AttributePosition::Struct]).collect());
+            match self {
+                Self::Event => &EVENT_POSITIONS,
             }
         }
     }

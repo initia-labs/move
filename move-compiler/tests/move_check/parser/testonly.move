@@ -16,4 +16,7 @@ module 0x1::A {
     public fun c_call() {
         abort 0
     }
+
+    #[event]
+    struct EventData{}
 }

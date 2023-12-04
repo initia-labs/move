@@ -69,7 +69,8 @@ fn verification_attributes(
                 KnownAttribute::Testing(_)
                 | KnownAttribute::Native(_)
                 | KnownAttribute::Deprecation(_)
-                | KnownAttribute::View(_) => None,
+                | KnownAttribute::View(_)
+                | KnownAttribute::Event(_) => None,
             },
         )
         .collect()
