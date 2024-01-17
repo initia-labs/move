@@ -9,8 +9,8 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use bytes::Bytes;
-use std::collections::btree_map::{self, BTreeMap};
 use serde::{Deserialize, Serialize};
+use std::collections::btree_map::{self, BTreeMap};
 
 /// A storage operation.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -74,8 +74,9 @@ impl<T> Op<T> {
 
 /// A collection of resource and module operations on a Move account.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct AccountChanges<Module, Resource> {
+pub struct AccountChanges<Module, Checksum, Resource> {
     modules: BTreeMap<Identifier, Op<Module>>,
+    checksums: BTreeMap<Identifier, Op<Checksum>>,
     resources: BTreeMap<StructTag, Op<Resource>>,
 }
 
@@ -109,37 +110,43 @@ where
                 match (r.as_ref(), op) {
                     (Modify(_) | New(_), New(_)) | (Delete, Delete | Modify(_)) => {
                         bail!("The given change sets cannot be squashed")
-                    },
+                    }
                     (Modify(_), Modify(data)) => *r = Modify(data),
                     (New(_), Modify(data)) => *r = New(data),
                     (Modify(_), Delete) => *r = Delete,
                     (Delete, New(data)) => *r = Modify(data),
                     (New(_), Delete) => {
                         entry.remove();
-                    },
+                    }
                 }
-            },
+            }
             Vacant(entry) => {
                 entry.insert(op);
-            },
+            }
         }
     }
 
     Ok(())
 }
 
-impl<Module, Resource> AccountChanges<Module, Resource> {
+impl<Module, Checksum, Resource> AccountChanges<Module, Checksum, Resource> {
     pub fn from_modules_resources(
         modules: BTreeMap<Identifier, Op<Module>>,
+        checksums: BTreeMap<Identifier, Op<Checksum>>,
         resources: BTreeMap<StructTag, Op<Resource>>,
     ) -> Self {
-        Self { modules, resources }
+        Self {
+            modules,
+            checksums,
+            resources,
+        }
     }
 
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             modules: BTreeMap::new(),
+            checksums: BTreeMap::new(),
             resources: BTreeMap::new(),
         }
     }
@@ -151,7 +158,7 @@ impl<Module, Resource> AccountChanges<Module, Resource> {
             Occupied(entry) => bail!("Module {} already exists", entry.key()),
             Vacant(entry) => {
                 entry.insert(op);
-            },
+            }
         }
 
         Ok(())
@@ -164,7 +171,7 @@ impl<Module, Resource> AccountChanges<Module, Resource> {
             Occupied(entry) => bail!("Resource {} already exists", entry.key()),
             Vacant(entry) => {
                 entry.insert(op);
-            },
+            }
         }
 
         Ok(())
@@ -174,9 +181,10 @@ impl<Module, Resource> AccountChanges<Module, Resource> {
         self,
     ) -> (
         BTreeMap<Identifier, Op<Module>>,
+        BTreeMap<Identifier, Op<Checksum>>,
         BTreeMap<StructTag, Op<Resource>>,
     ) {
-        (self.modules, self.resources)
+        (self.modules, self.checksums, self.resources)
     }
 
     pub fn into_resources(self) -> BTreeMap<StructTag, Op<Resource>> {
@@ -187,8 +195,16 @@ impl<Module, Resource> AccountChanges<Module, Resource> {
         self.modules
     }
 
+    pub fn into_checksums(self) -> BTreeMap<Identifier, Op<Checksum>> {
+        self.checksums
+    }
+
     pub fn modules(&self) -> &BTreeMap<Identifier, Op<Module>> {
         &self.modules
+    }
+
+    pub fn checksums(&self) -> &BTreeMap<Identifier, Op<Checksum>> {
+        &self.checksums
     }
 
     pub fn resources(&self) -> &BTreeMap<StructTag, Op<Resource>> {
@@ -210,11 +226,11 @@ impl<Module, Resource> AccountChanges<Module, Resource> {
 /// A collection of changes to a Move state. Each AccountChangeSet in the domain of `accounts`
 /// is guaranteed to be nonempty
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct Changes<Module, Resource> {
-    accounts: BTreeMap<AccountAddress, AccountChanges<Module, Resource>>,
+pub struct Changes<Module, Checksum, Resource> {
+    accounts: BTreeMap<AccountAddress, AccountChanges<Module, Checksum, Resource>>,
 }
 
-impl<Module, Resource> Changes<Module, Resource> {
+impl<Module, Checksum, Resource> Changes<Module, Checksum, Resource> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -225,7 +241,7 @@ impl<Module, Resource> Changes<Module, Resource> {
     pub fn add_account_changeset(
         &mut self,
         addr: AccountAddress,
-        account_changeset: AccountChanges<Module, Resource>,
+        account_changeset: AccountChanges<Module, Checksum, Resource>,
     ) -> Result<()> {
         match self.accounts.entry(addr) {
             btree_map::Entry::Occupied(_) => bail!(
@@ -234,24 +250,28 @@ impl<Module, Resource> Changes<Module, Resource> {
             ),
             btree_map::Entry::Vacant(entry) => {
                 entry.insert(account_changeset);
-            },
+            }
         }
 
         Ok(())
     }
 
-    pub fn accounts(&self) -> &BTreeMap<AccountAddress, AccountChanges<Module, Resource>> {
+    pub fn accounts(
+        &self,
+    ) -> &BTreeMap<AccountAddress, AccountChanges<Module, Checksum, Resource>> {
         &self.accounts
     }
 
-    pub fn into_inner(self) -> BTreeMap<AccountAddress, AccountChanges<Module, Resource>> {
+    pub fn into_inner(
+        self,
+    ) -> BTreeMap<AccountAddress, AccountChanges<Module, Checksum, Resource>> {
         self.accounts
     }
 
     fn get_or_insert_account_changeset(
         &mut self,
         addr: AccountAddress,
-    ) -> &mut AccountChanges<Module, Resource> {
+    ) -> &mut AccountChanges<Module, Checksum, Resource> {
         match self.accounts.entry(addr) {
             btree_map::Entry::Occupied(entry) => entry.into_mut(),
             btree_map::Entry::Vacant(entry) => entry.insert(AccountChanges::new()),
@@ -278,10 +298,10 @@ impl<Module, Resource> Changes<Module, Resource> {
             match self.accounts.entry(addr) {
                 btree_map::Entry::Occupied(mut entry) => {
                     entry.get_mut().squash(other_account_changeset)?;
-                },
+                }
                 btree_map::Entry::Vacant(entry) => {
                     entry.insert(other_account_changeset);
-                },
+                }
             }
         }
         Ok(())
@@ -296,11 +316,30 @@ impl<Module, Resource> Changes<Module, Resource> {
         })
     }
 
+    pub fn into_checksums(self) -> impl Iterator<Item = (ModuleId, Op<Checksum>)> {
+        self.accounts.into_iter().flat_map(|(addr, account)| {
+            account
+                .checksums
+                .into_iter()
+                .map(move |(module_name, blob_opt)| (ModuleId::new(addr, module_name), blob_opt))
+        })
+    }
+
     pub fn modules(&self) -> impl Iterator<Item = (AccountAddress, &Identifier, Op<&Module>)> {
         self.accounts.iter().flat_map(|(addr, account)| {
             let addr = *addr;
             account
                 .modules
+                .iter()
+                .map(move |(module_name, op)| (addr, module_name, op.as_ref()))
+        })
+    }
+
+    pub fn checksums(&self) -> impl Iterator<Item = (AccountAddress, &Identifier, Op<&Checksum>)> {
+        self.accounts.iter().flat_map(|(addr, account)| {
+            let addr = *addr;
+            account
+                .checksums
                 .iter()
                 .map(move |(module_name, op)| (addr, module_name, op.as_ref()))
         })
@@ -320,5 +359,5 @@ impl<Module, Resource> Changes<Module, Resource> {
 // These aliases are necessary because AccountChangeSet and ChangeSet were not
 // generic before. In order to minimise the code changes we alias new generic
 // types.
-pub type AccountChangeSet = AccountChanges<Bytes, Bytes>;
-pub type ChangeSet = Changes<Bytes, Bytes>;
+pub type AccountChangeSet = AccountChanges<Bytes, [u8; 32], Bytes>;
+pub type ChangeSet = Changes<Bytes, [u8; 32], Bytes>;

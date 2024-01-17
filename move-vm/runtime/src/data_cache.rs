@@ -20,6 +20,7 @@ use move_vm_types::{
     loaded_data::runtime_types::Type,
     values::{GlobalValue, Value},
 };
+use sha3::{Digest, Sha3_256};
 use std::collections::btree_map::BTreeMap;
 
 pub struct AccountDataCache {
@@ -27,6 +28,7 @@ pub struct AccountDataCache {
     // an aggregator or snapshot.
     data_map: BTreeMap<Type, (MoveTypeLayout, GlobalValue, bool)>,
     module_map: BTreeMap<Identifier, (Bytes, bool)>,
+    checksum_map: BTreeMap<Identifier, ([u8; 32], bool)>,
 }
 
 impl AccountDataCache {
@@ -34,6 +36,7 @@ impl AccountDataCache {
         Self {
             data_map: BTreeMap::new(),
             module_map: BTreeMap::new(),
+            checksum_map: BTreeMap::new(),
         }
     }
 }
@@ -90,8 +93,8 @@ impl<'r> TransactionDataCache<'r> {
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
         loader: &Loader,
-    ) -> PartialVMResult<Changes<Bytes, Resource>> {
-        let mut change_set = Changes::<Bytes, Resource>::new();
+    ) -> PartialVMResult<Changes<Bytes, [u8; 32], Resource>> {
+        let mut change_set = Changes::<Bytes, [u8; 32], Resource>::new();
         for (addr, account_data_cache) in self.account_map.into_iter() {
             let mut modules = BTreeMap::new();
             for (module_name, (module_blob, is_republishing)) in account_data_cache.module_map {
@@ -101,6 +104,16 @@ impl<'r> TransactionDataCache<'r> {
                     Op::New(module_blob)
                 };
                 modules.insert(module_name, op);
+            }
+
+            let mut checksums = BTreeMap::new();
+            for (module_name, (checksum, is_republishing)) in account_data_cache.checksum_map {
+                let op = if is_republishing {
+                    Op::Modify(checksum)
+                } else {
+                    Op::New(checksum)
+                };
+                checksums.insert(module_name, op);
             }
 
             let mut resources = BTreeMap::new();
@@ -122,7 +135,7 @@ impl<'r> TransactionDataCache<'r> {
                 change_set
                     .add_account_changeset(
                         addr,
-                        AccountChanges::from_modules_resources(modules, resources),
+                        AccountChanges::from_modules_resources(modules, checksums, resources),
                     )
                     .expect("accounts should be unique");
             }
@@ -175,7 +188,7 @@ impl<'r> TransactionDataCache<'r> {
                 // non-struct top-level value; can't happen
                 {
                     return Err(PartialVMError::new(StatusCode::INTERNAL_TYPE_ERROR))
-                },
+                }
             };
             // TODO(Gas): Shall we charge for this?
             let (ty_layout, has_aggregator_lifting) =
@@ -213,11 +226,11 @@ impl<'r> TransactionDataCache<'r> {
                                 StatusCode::FAILED_TO_DESERIALIZE_RESOURCE,
                             )
                             .with_message(msg));
-                        },
+                        }
                     };
 
                     GlobalValue::cached(val)?
-                },
+                }
                 None => GlobalValue::none(),
             };
 
@@ -264,9 +277,19 @@ impl<'r> TransactionDataCache<'r> {
                 (*module_id.address(), AccountDataCache::new())
             });
 
+        // compute checksum
+        let mut sha3_256 = Sha3_256::new();
+        sha3_256.update(&blob);
+        let checksum: [u8; 32] = sha3_256.finalize().into();
+
         account_cache
             .module_map
             .insert(module_id.name().to_owned(), (blob.into(), is_republishing));
+
+        account_cache.checksum_map.insert(
+            module_id.name().to_owned(),
+            (checksum.into(), is_republishing),
+        );
 
         Ok(())
     }

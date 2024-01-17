@@ -279,7 +279,7 @@ impl<'r, 'l> Session<'r, 'l> {
     pub fn finish_with_custom_effects<Resource>(
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
-    ) -> VMResult<Changes<Bytes, Resource>> {
+    ) -> VMResult<Changes<Bytes, [u8; 32], Resource>> {
         self.data_cache
             .into_custom_effects(resource_converter, &self.loader)
             .map_err(|e| e.finish(Location::Undefined))
@@ -301,7 +301,7 @@ impl<'r, 'l> Session<'r, 'l> {
     pub fn finish_with_extensions_with_custom_effects<Resource>(
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
-    ) -> VMResult<(Changes<Bytes, Resource>, NativeContextExtensions<'r>)> {
+    ) -> VMResult<(Changes<Bytes, [u8; 32], Resource>, NativeContextExtensions<'r>)> {
         let Session {
             data_cache,
             native_extensions,
