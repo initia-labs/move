@@ -132,12 +132,7 @@ impl<'a, 'b, 'c> NativeContext<'a, 'b, 'c> {
     ) -> VMResult<(bool, Option<NumBytes>)> {
         let (value, num_bytes) = self
             .data_store
-            .load_resource(
-                self.resolver.loader(),
-                address,
-                type_,
-                self.resolver.module_store(),
-            )
+            .load_resource(self.resolver.loader(), address, type_)
             .map_err(|err| err.finish(Location::Undefined))?;
         let exists = value
             .exists()
