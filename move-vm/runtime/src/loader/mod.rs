@@ -122,7 +122,7 @@ impl ScriptCache {
                     script.parameter_tys.clone(),
                     script.return_tys.clone(),
                 )
-            },
+            }
         }
     }
 }
@@ -184,38 +184,6 @@ pub(crate) struct Loader {
     natives: NativeFunctions,
     name_cache: StructNameCache,
 
-    // The below field supports a hack to workaround well-known issues with the
-    // loader cache. This cache is not designed to support module upgrade or deletion.
-    // This leads to situations where the cache does not reflect the state of storage:
-    //
-    // 1. On module upgrade, the upgraded module is in storage, but the old one still in the cache.
-    // 2. On an abandoned code publishing transaction, the cache may contain a module which was
-    //    never committed to storage by the adapter.
-    //
-    // The solution is to add a flag to Loader marking it as 'invalidated'. For scenario (1),
-    // the VM sets the flag itself. For scenario (2), a public API allows the adapter to set
-    // the flag.
-    //
-    // If the cache is invalidated, it can (and must) still be used until there are no more
-    // sessions alive which are derived from a VM with this loader. This is because there are
-    // internal data structures derived from the loader which can become inconsistent. Therefore
-    // the adapter must explicitly call a function to flush the invalidated loader.
-    //
-    // This code (the loader) needs a complete refactoring. The new loader should
-    //
-    // - support upgrade and deletion of modules, while still preserving max cache lookup
-    //   performance. This is essential for a cache like this in a multi-tenant execution
-    //   environment.
-    // - should delegate lifetime ownership to the adapter. Code loading (including verification)
-    //   is a major execution bottleneck. We should be able to reuse a cache for the lifetime of
-    //   the adapter/node, not just a VM or even session (as effectively today).
-    invalidated: RwLock<bool>,
-
-    // Collects the cache hits on module loads. This information can be read and reset by
-    // an adapter to reason about read/write conflicts of code publishing transactions and
-    // other transactions.
-    module_cache_hits: RwLock<BTreeSet<ModuleId>>,
-
     vm_config: VMConfig,
 }
 
@@ -227,8 +195,6 @@ impl Clone for Loader {
             type_cache: RwLock::new(self.type_cache.read().clone()),
             natives: self.natives.clone(),
             name_cache: self.name_cache.clone(),
-            invalidated: RwLock::new(*self.invalidated.read()),
-            module_cache_hits: RwLock::new(self.module_cache_hits.read().clone()),
             vm_config: self.vm_config.clone(),
         }
     }
@@ -242,64 +208,12 @@ impl Loader {
             type_cache: RwLock::new(TypeCache::new()),
             name_cache: StructNameCache::new(),
             natives,
-            invalidated: RwLock::new(false),
-            module_cache_hits: RwLock::new(BTreeSet::new()),
             vm_config,
         }
     }
 
     pub(crate) fn vm_config(&self) -> &VMConfig {
         &self.vm_config
-    }
-
-    /// Gets and clears module cache hits. A cache hit may also be caused indirectly by
-    /// loading a function or a type. This not only returns the direct hit, but also
-    /// indirect ones, that is all dependencies.
-    pub(crate) fn get_and_clear_module_cache_hits(&self) -> BTreeSet<ModuleId> {
-        let mut result = BTreeSet::new();
-        let hits: BTreeSet<ModuleId> = std::mem::take(&mut self.module_cache_hits.write());
-        for id in hits {
-            self.transitive_dep_closure(&id, &mut result)
-        }
-        result
-    }
-
-    fn transitive_dep_closure(&self, id: &ModuleId, visited: &mut BTreeSet<ModuleId>) {
-        if !visited.insert(id.clone()) {
-            return;
-        }
-        let deps = self
-            .module_cache
-            .read()
-            .modules
-            .get(id)
-            .unwrap()
-            .module
-            .immediate_dependencies();
-        for dep in deps {
-            self.transitive_dep_closure(&dep, visited)
-        }
-    }
-
-    /// Flush this cache if it is marked as invalidated.
-    pub(crate) fn flush_if_invalidated(&self) {
-        let mut invalidated = self.invalidated.write();
-        if *invalidated {
-            *self.scripts.write() = ScriptCache::new();
-            *self.module_cache.write() = ModuleCache::new();
-            *self.type_cache.write() = TypeCache::new();
-            *invalidated = false;
-        }
-    }
-
-    /// Mark this cache as invalidated.
-    pub(crate) fn mark_as_invalid(&self) {
-        *self.invalidated.write() = true;
-    }
-
-    /// Check whether this cache is invalidated.
-    pub(crate) fn is_invalidated(&self) -> bool {
-        *self.invalidated.read()
     }
 
     //
@@ -337,7 +251,7 @@ impl Loader {
                     &self.name_cache,
                 )?;
                 scripts.insert(hash_value, script)
-            },
+            }
         };
 
         // verify type arguments
@@ -387,7 +301,7 @@ impl Loader {
                 return Err(PartialVMError::new(StatusCode::CODE_DESERIALIZATION_ERROR)
                     .with_message(msg)
                     .finish(Location::Script));
-            },
+            }
         };
 
         match self.verify_script(&script) {
@@ -400,7 +314,7 @@ impl Loader {
                     .collect::<VMResult<_>>()?;
                 self.verify_script_dependencies(&script, loaded_deps)?;
                 Ok(script)
-            },
+            }
             Err(err) => Err(err),
         }
     }
@@ -464,17 +378,17 @@ impl Loader {
                 btree_map::Entry::Vacant(vacant_entry) => {
                     vacant_entry.insert(expected);
                     true
-                },
+                }
                 btree_map::Entry::Occupied(occupied_entry) => *occupied_entry.get() == expected,
             },
             // Recursive types we need to recurse the matching types
             (Type::Reference(ret_inner), Type::Reference(expected_inner))
             | (Type::MutableReference(ret_inner), Type::MutableReference(expected_inner)) => {
                 Self::match_return_type(ret_inner, expected_inner, map)
-            },
+            }
             (Type::Vector(ret_inner), Type::Vector(expected_inner)) => {
                 Self::match_return_type(ret_inner, expected_inner, map)
-            },
+            }
             // Abilities should not contribute to the equality check as they just serve for caching computations.
             // For structs the both need to be the same struct.
             (
@@ -502,7 +416,7 @@ impl Loader {
                         .iter()
                         .zip(expected_fields.iter())
                         .all(|types| Self::match_return_type(types.0, types.1, map))
-            },
+            }
             // For primitive types we need to assure the types match
             (Type::U8, Type::U8)
             | (Type::U16, Type::U16)
@@ -794,7 +708,7 @@ impl Loader {
             TypeTag::Signer => Type::Signer,
             TypeTag::Vector(tt) => {
                 Type::Vector(triomphe::Arc::new(self.load_type(tt, data_store)?))
-            },
+            }
             TypeTag::Struct(struct_tag) => {
                 let module_id = ModuleId::new(struct_tag.address, struct_tag.module.clone());
                 self.load_module(&module_id, data_store)?;
@@ -825,7 +739,7 @@ impl Loader {
                         ),
                     }
                 }
-            },
+            }
         })
     }
 
@@ -850,7 +764,6 @@ impl Loader {
     ) -> VMResult<Arc<Module>> {
         // if the module is already in the code cache, load the cached version
         if let Some(cached) = self.module_cache.read().module_at(id) {
-            self.module_cache_hits.write().insert(id.clone());
             return Ok(cached);
         }
 
@@ -890,7 +803,7 @@ impl Loader {
             Err(err) if allow_loading_failure => return Err(err),
             Err(err) => {
                 return Err(expect_no_verification_errors(err));
-            },
+            }
         };
 
         // for bytes obtained from the data store, they should always deserialize and verify.
@@ -1009,7 +922,7 @@ impl Loader {
                             allow_dependency_loading_failure,
                             dependencies_depth + 1,
                         )?
-                    },
+                    }
                     Some(cached) => cached,
                 };
                 cached_deps.push(loaded);
@@ -1143,7 +1056,7 @@ impl Loader {
                 {
                     return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
                 }
-            },
+            }
             Type::StructInstantiation {
                 ty_args: struct_inst,
                 ..
@@ -1155,7 +1068,7 @@ impl Loader {
                         return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
                     }
                 }
-            },
+            }
             Type::Address
             | Type::Bool
             | Type::Signer
@@ -1211,7 +1124,7 @@ impl Loader {
                             format!("Failed to resolve function: {:?}::{:?}", module, name),
                         )
                     })
-            },
+            }
         }
     }
 
@@ -1409,7 +1322,7 @@ impl<'a> Resolver<'a> {
                 let handle = &module.field_handles[idx.0 as usize];
 
                 Ok(handle.definition_struct_type.fields[handle.offset].clone())
-            },
+            }
             BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
         }
     }
@@ -1530,7 +1443,7 @@ impl<'a> Resolver<'a> {
                     idx: struct_.idx,
                     ability: AbilityInfo::struct_(struct_.abilities),
                 })
-            },
+            }
             BinaryType::Script(_) => unreachable!("Scripts cannot have field instructions"),
         }
     }
@@ -1557,7 +1470,7 @@ impl<'a> Resolver<'a> {
                         struct_.phantom_ty_args_mask.clone(),
                     ),
                 })
-            },
+            }
             BinaryType::Script(_) => unreachable!("Scripts cannot have field instructions"),
         }
     }
@@ -1742,7 +1655,7 @@ impl Script {
                                         .to_owned(),
                                 )
                                 .finish(Location::Script));
-                            },
+                            }
                             Some(sig_token) => sig_token,
                         };
                         single_signature_token_map.insert(
@@ -1751,8 +1664,8 @@ impl Script {
                                 .map_err(|e| e.finish(Location::Script))?,
                         );
                     }
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
 
@@ -1933,7 +1846,7 @@ impl Loader {
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!("no type tag for {:?}", ty)),
                 );
-            },
+            }
         })
     }
 
@@ -1945,18 +1858,18 @@ impl Loader {
                 Type::Vector(ty) => {
                     result += 1;
                     todo.push(ty);
-                },
+                }
                 Type::Reference(ty) | Type::MutableReference(ty) => {
                     result += 1;
                     todo.push(ty);
-                },
+                }
                 Type::StructInstantiation { ty_args, .. } => {
                     result += 1;
                     todo.extend(ty_args.iter())
-                },
+                }
                 _ => {
                     result += 1;
-                },
+                }
             }
         }
         result
@@ -2079,39 +1992,39 @@ impl Loader {
             Type::Bool => {
                 *count += 1;
                 (MoveTypeLayout::Bool, false)
-            },
+            }
             Type::U8 => {
                 *count += 1;
                 (MoveTypeLayout::U8, false)
-            },
+            }
             Type::U16 => {
                 *count += 1;
                 (MoveTypeLayout::U16, false)
-            },
+            }
             Type::U32 => {
                 *count += 1;
                 (MoveTypeLayout::U32, false)
-            },
+            }
             Type::U64 => {
                 *count += 1;
                 (MoveTypeLayout::U64, false)
-            },
+            }
             Type::U128 => {
                 *count += 1;
                 (MoveTypeLayout::U128, false)
-            },
+            }
             Type::U256 => {
                 *count += 1;
                 (MoveTypeLayout::U256, false)
-            },
+            }
             Type::Address => {
                 *count += 1;
                 (MoveTypeLayout::Address, false)
-            },
+            }
             Type::Signer => {
                 *count += 1;
                 (MoveTypeLayout::Signer, false)
-            },
+            }
             Type::Vector(ty) => {
                 *count += 1;
                 let (layout, has_identifier_mappings) =
@@ -2120,27 +2033,27 @@ impl Loader {
                     MoveTypeLayout::Vector(Box::new(layout)),
                     has_identifier_mappings,
                 )
-            },
+            }
             Type::Struct { idx, .. } => {
                 *count += 1;
                 // Note depth is incread inside struct_name_to_type_layout instead.
                 let (layout, has_identifier_mappings) =
                     self.struct_name_to_type_layout(*idx, &[], count, depth)?;
                 (MoveTypeLayout::Struct(layout), has_identifier_mappings)
-            },
+            }
             Type::StructInstantiation { idx, ty_args, .. } => {
                 *count += 1;
                 // Note depth is incread inside struct_name_to_type_layout instead.
                 let (layout, has_identifier_mappings) =
                     self.struct_name_to_type_layout(*idx, ty_args, count, depth)?;
                 (MoveTypeLayout::Struct(layout), has_identifier_mappings)
-            },
+            }
             Type::Reference(_) | Type::MutableReference(_) | Type::TyParam(_) => {
                 return Err(
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!("no type layout for {:?}", ty)),
                 );
-            },
+            }
         })
     }
 
@@ -2245,7 +2158,7 @@ impl Loader {
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!("no type layout for {:?}", ty)),
                 );
-            },
+            }
         })
     }
 
@@ -2295,19 +2208,19 @@ impl Loader {
                 let mut inner = self.calculate_depth_of_type(ty)?;
                 inner.scale(1);
                 inner
-            },
+            }
             Type::Reference(ty) | Type::MutableReference(ty) => {
                 let mut inner = self.calculate_depth_of_type(ty)?;
                 inner.scale(1);
                 inner
-            },
+            }
             Type::TyParam(ty_idx) => DepthFormula::type_parameter(*ty_idx),
             Type::Struct { idx, .. } => {
                 let mut struct_formula = self.calculate_depth_of_struct(*idx)?;
                 debug_assert!(struct_formula.terms.is_empty());
                 struct_formula.scale(1);
                 struct_formula
-            },
+            }
             Type::StructInstantiation { idx, ty_args, .. } => {
                 let ty_arg_map = ty_args
                     .iter()
@@ -2321,7 +2234,7 @@ impl Loader {
                 let mut subst_struct_formula = struct_formula.subst(ty_arg_map)?;
                 subst_struct_formula.scale(1);
                 subst_struct_formula
-            },
+            }
         })
     }
 

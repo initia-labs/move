@@ -3,12 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    config::VMConfig,
     data_cache::TransactionDataCache,
     interpreter::Interpreter,
     loader::{Function, LoadedFunction, Loader},
     native_extensions::NativeContextExtensions,
-    native_functions::{NativeFunction, NativeFunctions},
     session::{LoadedFunctionInstantiation, SerializedReturnValues},
 };
 use move_binary_format::{
@@ -21,7 +19,7 @@ use move_binary_format::{
 use move_bytecode_verifier::script_signature;
 use move_core_types::{
     account_address::AccountAddress,
-    identifier::{IdentStr, Identifier},
+    identifier::IdentStr,
     language_storage::{ModuleId, TypeTag},
     value::MoveTypeLayout,
     vm_status::StatusCode,
@@ -35,24 +33,18 @@ use std::{borrow::Borrow, collections::BTreeSet, sync::Arc};
 
 /// An instantiation of the MoveVM.
 #[derive(Clone)]
-pub(crate) struct VMRuntime {
-    loader: Loader,
-}
+pub(crate) struct VMRuntime {}
 
 impl VMRuntime {
-    pub(crate) fn new(
-        natives: impl IntoIterator<Item = (AccountAddress, Identifier, Identifier, NativeFunction)>,
-        vm_config: VMConfig,
-    ) -> PartialVMResult<Self> {
-        Ok(VMRuntime {
-            loader: Loader::new(NativeFunctions::new(natives)?, vm_config),
-        })
+    pub(crate) fn new() -> Self {
+        VMRuntime {}
     }
 
     pub(crate) fn publish_module_bundle(
         &self,
         modules: Vec<Vec<u8>>,
         sender: AccountAddress,
+        loader: &Loader,
         data_store: &mut TransactionDataCache,
         _gas_meter: &mut impl GasMeter,
         compat: Compatibility,
@@ -64,7 +56,7 @@ impl VMRuntime {
             .map(|blob| {
                 CompiledModule::deserialize_with_config(
                     blob,
-                    &self.loader.vm_config().deserializer_config,
+                    &loader.vm_config().deserializer_config,
                 )
             })
             .collect::<PartialVMResult<Vec<_>>>()
@@ -106,7 +98,7 @@ impl VMRuntime {
             let module_id = module.self_id();
 
             if data_store.exists_module(&module_id)? && compat.need_check_compat() {
-                let old_module_ref = self.loader.load_module(&module_id, data_store)?;
+                let old_module_ref = loader.load_module(&module_id, data_store)?;
                 let old_module = old_module_ref.module();
                 let old_m = normalized::Module::new(old_module);
                 let new_m = normalized::Module::new(module);
@@ -121,8 +113,7 @@ impl VMRuntime {
         }
 
         // Perform bytecode and loading verification. Modules must be sorted in topological order.
-        self.loader
-            .verify_module_bundle_for_publication(&compiled_modules, data_store)?;
+        loader.verify_module_bundle_for_publication(&compiled_modules, data_store)?;
 
         // NOTE: we want to (informally) argue that all modules pass the linking check before being
         // published to the data store.
@@ -180,18 +171,18 @@ impl VMRuntime {
         // All modules verified, publish them to data cache
         for (module, blob) in compiled_modules.into_iter().zip(modules.into_iter()) {
             let is_republishing = data_store.exists_module(&module.self_id())?;
-            if is_republishing {
-                // This is an upgrade, so invalidate the loader cache, which still contains the
-                // old module.
-                self.loader.mark_as_invalid();
-            }
             data_store.publish_module(&module.self_id(), blob, is_republishing)?;
         }
         Ok(())
     }
 
-    fn deserialize_value(&self, ty: &Type, arg: impl Borrow<[u8]>) -> PartialVMResult<Value> {
-        let layout = match self.loader.type_to_type_layout(ty) {
+    fn deserialize_value(
+        &self,
+        loader: &Loader,
+        ty: &Type,
+        arg: impl Borrow<[u8]>,
+    ) -> PartialVMResult<Value> {
+        let layout = match loader.type_to_type_layout(ty) {
             Ok(layout) => layout,
             Err(_err) => {
                 return Err(PartialVMError::new(
@@ -212,6 +203,7 @@ impl VMRuntime {
 
     fn deserialize_args(
         &self,
+        loader: &Loader,
         arg_tys: Vec<Type>,
         serialized_args: Vec<impl Borrow<[u8]>>,
     ) -> PartialVMResult<(Locals, Vec<Value>)> {
@@ -239,14 +231,14 @@ impl VMRuntime {
                 Type::MutableReference(inner_t) | Type::Reference(inner_t) => {
                     dummy_locals.store_loc(
                         idx,
-                        self.deserialize_value(inner_t, arg_bytes)?,
-                        self.loader
+                        self.deserialize_value(loader, inner_t, arg_bytes)?,
+                        loader
                             .vm_config()
                             .enable_invariant_violation_check_in_swap_loc,
                     )?;
                     dummy_locals.borrow_loc(idx)
-                },
-                _ => self.deserialize_value(&arg_ty, arg_bytes),
+                }
+                _ => self.deserialize_value(loader, &arg_ty, arg_bytes),
             })
             .collect::<PartialVMResult<Vec<_>>>()?;
         Ok((dummy_locals, deserialized_args))
@@ -254,6 +246,7 @@ impl VMRuntime {
 
     fn serialize_return_value(
         &self,
+        loader: &Loader,
         ty: &Type,
         value: Value,
     ) -> PartialVMResult<(Vec<u8>, MoveTypeLayout)> {
@@ -270,7 +263,7 @@ impl VMRuntime {
             _ => (ty, value),
         };
 
-        let layout = self.loader.type_to_type_layout(ty).map_err(|_err| {
+        let layout = loader.type_to_type_layout(ty).map_err(|_err| {
             PartialVMError::new(StatusCode::VERIFICATION_ERROR).with_message(
                 "entry point functions cannot have non-serializable return types".to_string(),
             )
@@ -282,20 +275,18 @@ impl VMRuntime {
 
         // INITIA CUSTOM
         // for serialization
-        let layout_for_return = self
-            .loader
-            .type_to_fully_annotated_layout(ty, module_store)
-            .map_err(|_err| {
-                PartialVMError::new(StatusCode::VERIFICATION_ERROR).with_message(
-                    "entry point functions cannot have non-serializable return types".to_string(),
-                )
-            })?;
+        let layout_for_return = loader.type_to_fully_annotated_layout(ty).map_err(|_err| {
+            PartialVMError::new(StatusCode::VERIFICATION_ERROR).with_message(
+                "entry point functions cannot have non-serializable return types".to_string(),
+            )
+        })?;
 
         Ok((bytes, layout_for_return))
     }
 
     fn serialize_return_values(
         &self,
+        loader: &Loader,
         return_types: &[Type],
         return_values: Vec<Value>,
     ) -> PartialVMResult<Vec<(Vec<u8>, MoveTypeLayout)>> {
@@ -314,7 +305,7 @@ impl VMRuntime {
         return_types
             .iter()
             .zip(return_values)
-            .map(|(ty, value)| self.serialize_return_value(ty, value))
+            .map(|(ty, value)| self.serialize_return_value(loader, ty, value))
             .collect()
     }
 
@@ -326,6 +317,7 @@ impl VMRuntime {
         param_types: Vec<Type>,
         return_types: Vec<Type>,
         serialized_args: Vec<impl Borrow<[u8]>>,
+        loader: &Loader,
         data_store: &mut TransactionDataCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
@@ -344,7 +336,7 @@ impl VMRuntime {
             })
             .collect::<Vec<_>>();
         let (mut dummy_locals, deserialized_args) = self
-            .deserialize_args(arg_types, serialized_args)
+            .deserialize_args(loader, arg_types, serialized_args)
             .map_err(|e| e.finish(Location::Undefined))?;
         let return_types = return_types
             .into_iter()
@@ -359,11 +351,11 @@ impl VMRuntime {
             data_store,
             gas_meter,
             extensions,
-            &self.loader,
+            &loader,
         )?;
 
         let serialized_return_values = self
-            .serialize_return_values(&return_types, return_values)
+            .serialize_return_values(loader, &return_types, return_values)
             .map_err(|e| e.finish(Location::Undefined))?;
         let serialized_mut_ref_outputs = mut_ref_args
             .into_iter()
@@ -371,11 +363,11 @@ impl VMRuntime {
                 // serialize return values first in the case that a value points into this local
                 let local_val = dummy_locals.move_loc(
                     idx,
-                    self.loader
+                    loader
                         .vm_config()
                         .enable_invariant_violation_check_in_swap_loc,
                 )?;
-                let (bytes, layout) = self.serialize_return_value(&ty, local_val)?;
+                let (bytes, layout) = self.serialize_return_value(loader, &ty, local_val)?;
                 Ok((idx as LocalIndex, bytes, layout))
             })
             .collect::<PartialVMResult<_>>()
@@ -396,6 +388,7 @@ impl VMRuntime {
         function_name: &IdentStr,
         ty_args: Vec<TypeTag>,
         serialized_args: Vec<impl Borrow<[u8]>>,
+        loader: &Loader,
         data_store: &mut TransactionDataCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
@@ -403,13 +396,13 @@ impl VMRuntime {
     ) -> VMResult<SerializedReturnValues> {
         // load the function
         let (module, function, instantiation) =
-            self.loader
-                .load_function(module, function_name, &ty_args, data_store)?;
+            loader.load_function(module, function_name, &ty_args, data_store)?;
 
         self.execute_function_instantiation(
             LoadedFunction { module, function },
             instantiation,
             serialized_args,
+            loader,
             data_store,
             gas_meter,
             extensions,
@@ -422,6 +415,7 @@ impl VMRuntime {
         func: LoadedFunction,
         function_instantiation: LoadedFunctionInstantiation,
         serialized_args: Vec<impl Borrow<[u8]>>,
+        loader: &Loader,
         data_store: &mut TransactionDataCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
@@ -470,6 +464,7 @@ impl VMRuntime {
             parameters,
             return_,
             serialized_args,
+            loader,
             data_store,
             gas_meter,
             extensions,
@@ -482,6 +477,7 @@ impl VMRuntime {
         script: impl Borrow<[u8]>,
         ty_args: Vec<TypeTag>,
         serialized_args: Vec<impl Borrow<[u8]>>,
+        loader: &Loader,
         data_store: &mut TransactionDataCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
@@ -494,9 +490,7 @@ impl VMRuntime {
                 parameters,
                 return_,
             },
-        ) = self
-            .loader
-            .load_script(script.borrow(), &ty_args, data_store)?;
+        ) = loader.load_script(script.borrow(), &ty_args, data_store)?;
         // execute the function
         self.execute_function_impl(
             func,
@@ -504,13 +498,10 @@ impl VMRuntime {
             parameters,
             return_,
             serialized_args,
+            loader,
             data_store,
             gas_meter,
             extensions,
         )
-    }
-
-    pub(crate) fn loader(&self) -> &Loader {
-        &self.loader
     }
 }

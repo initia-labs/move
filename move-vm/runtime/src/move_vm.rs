@@ -3,22 +3,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    config::VMConfig, data_cache::TransactionDataCache, native_extensions::NativeContextExtensions,
-    native_functions::NativeFunction, runtime::VMRuntime, session::Session,
+    config::VMConfig,
+    data_cache::TransactionDataCache,
+    loader::Loader,
+    native_extensions::NativeContextExtensions,
+    native_functions::{NativeFunction, NativeFunctions},
+    runtime::VMRuntime,
+    session::Session,
 };
-use move_binary_format::{
-    errors::{Location, PartialVMError, VMResult},
-    CompiledModule,
-};
+use move_binary_format::errors::{Location, PartialVMError, VMResult};
 use move_core_types::{
-    account_address::AccountAddress, identifier::Identifier, language_storage::ModuleId,
-    metadata::Metadata, resolver::MoveResolver,
+    account_address::AccountAddress, identifier::Identifier, resolver::MoveResolver,
 };
-use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone)]
 pub struct MoveVM {
     pub(crate) runtime: VMRuntime,
+    pub(crate) natives: NativeFunctions,
+    pub(crate) vm_config: VMConfig,
 }
 
 impl MoveVM {
@@ -33,8 +35,10 @@ impl MoveVM {
         vm_config: VMConfig,
     ) -> VMResult<Self> {
         Ok(Self {
-            runtime: VMRuntime::new(natives, vm_config)
+            runtime: VMRuntime::new(),
+            natives: NativeFunctions::new(natives)
                 .map_err(|err| err.finish(Location::Undefined))?,
+            vm_config,
         })
     }
 
@@ -69,69 +73,7 @@ impl MoveVM {
             move_vm: self,
             data_cache: TransactionDataCache::new(remote),
             native_extensions,
+            loader: Loader::new(self.natives.clone(), self.vm_config.clone()),
         }
-    }
-
-    /// Load a module into VM's code cache
-    pub fn load_module(
-        &self,
-        module_id: &ModuleId,
-        remote: &impl MoveResolver<PartialVMError>,
-    ) -> VMResult<Arc<CompiledModule>> {
-        self.runtime
-            .loader()
-            .load_module(module_id, &TransactionDataCache::new(remote))
-            .map(|arc_module| arc_module.arc_module())
-    }
-
-    /// Allows the adapter to announce to the VM that the code loading cache should be considered
-    /// outdated. This can happen if the adapter executed a particular code publishing transaction
-    /// but decided to not commit the result to the data store. Because the code cache currently
-    /// does not support deletion, the cache will, incorrectly, still contain this module.
-    /// TODO: new loader architecture
-    pub fn mark_loader_cache_as_invalid(&self) {
-        self.runtime.loader().mark_as_invalid()
-    }
-
-    /// Returns true if the loader cache has been invalidated (either by explicit call above
-    /// or by the runtime)
-    pub fn is_loader_cache_invalidated(&self) -> bool {
-        self.runtime.loader().is_invalidated()
-    }
-
-    /// If the loader cache has been invalidated (either by the above call or by internal logic)
-    /// flush it so it is valid again. Notice that should only be called if there are no
-    /// outstanding sessions created from this VM.
-    /// TODO: new loader architecture
-    pub fn flush_loader_cache_if_invalidated(&self) {
-        self.runtime.loader().flush_if_invalidated()
-    }
-
-    /// Gets and clears module cache hits. This is hack which allows the adapter to see module
-    /// reads if executing multiple transactions in a VM. Without this, the adapter only sees
-    /// the first load of a module.
-    /// TODO: new loader architecture
-    pub fn get_and_clear_module_cache_hits(&self) -> BTreeSet<ModuleId> {
-        self.runtime.loader().get_and_clear_module_cache_hits()
-    }
-
-    /// Attempts to discover metadata in a given module with given key. Availability
-    /// of this data may depend on multiple aspects. In general, no hard assumptions of
-    /// availability should be made, but typically, one can expect that
-    /// the modules which have been involved in the execution of the last session are available.
-    ///
-    /// This is called by an adapter to extract, for example, debug information out of
-    /// the metadata section of the code for post mortem analysis. Notice that because
-    /// of ownership of the underlying binary representation of modules hidden behind an rwlock,
-    /// this actually has to hand back a copy of the associated metadata, so metadata should
-    /// be organized keeping this in mind.
-    ///
-    /// TODO: in the new loader architecture, as the loader is visible to the adapter, one would
-    ///   call this directly via the loader instead of the VM.
-    pub fn with_module_metadata<T, F>(&self, module: &ModuleId, f: F) -> Option<T>
-    where
-        F: FnOnce(&[Metadata]) -> Option<T>,
-    {
-        f(&self.runtime.loader().get_module(module)?.module().metadata)
     }
 }

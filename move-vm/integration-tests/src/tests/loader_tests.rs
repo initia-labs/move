@@ -225,7 +225,11 @@ fn load_phantom_module() {
 
     let module_id = module.self_id();
     adapter.publish_modules(vec![module]);
-    adapter.vm.load_module(&module_id, &adapter.store).unwrap();
+    adapter
+        .vm
+        .new_session(&adapter.store)
+        .load_module(&module_id)
+        .unwrap();
 }
 
 #[test]
@@ -259,7 +263,11 @@ fn load_with_extra_ability() {
 
     let module_id = module.self_id();
     adapter.publish_modules(vec![module]);
-    adapter.vm.load_module(&module_id, &adapter.store).unwrap();
+    adapter
+        .vm
+        .new_session(&adapter.store)
+        .load_module(&module_id)
+        .unwrap();
 }
 
 #[test]
