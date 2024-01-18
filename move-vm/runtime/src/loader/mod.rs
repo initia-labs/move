@@ -177,7 +177,7 @@ impl StructNameCache {
 // entities. Each cache is protected by a `RwLock`. Operation in the Loader must be thread safe
 // (operating on values on the stack) and when cache needs updating the mutex must be taken.
 // The `pub(crate)` API is what a Loader offers to the runtime.
-pub(crate) struct Loader {
+pub struct Loader {
     scripts: RwLock<ScriptCache>,
     module_cache: RwLock<ModuleCache>,
     type_cache: RwLock<TypeCache>,
@@ -2274,7 +2274,7 @@ impl Loader {
 
 // Public APIs for external uses.
 impl Loader {
-    pub(crate) fn get_type_layout(
+    pub fn get_type_layout(
         &self,
         type_tag: &TypeTag,
         move_storage: &TransactionDataCache,
@@ -2284,7 +2284,7 @@ impl Loader {
             .map_err(|e| e.finish(Location::Undefined))
     }
 
-    pub(crate) fn get_fully_annotated_type_layout(
+    pub fn get_fully_annotated_type_layout(
         &self,
         type_tag: &TypeTag,
         move_storage: &TransactionDataCache,

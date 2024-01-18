@@ -301,7 +301,10 @@ impl<'r, 'l> Session<'r, 'l> {
     pub fn finish_with_extensions_with_custom_effects<Resource>(
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
-    ) -> VMResult<(Changes<Bytes, [u8; 32], Resource>, NativeContextExtensions<'r>)> {
+    ) -> VMResult<(
+        Changes<Bytes, [u8; 32], Resource>,
+        NativeContextExtensions<'r>,
+    )> {
         let Session {
             data_cache,
             native_extensions,
@@ -311,6 +314,22 @@ impl<'r, 'l> Session<'r, 'l> {
             .into_custom_effects(resource_converter, &self.loader)
             .map_err(|e| e.finish(Location::Undefined))?;
         Ok((change_set, native_extensions))
+    }
+
+    /// Same like `finish`, but also extracts the native context extensions from the session.
+    pub fn finish_with_extensions_with_loader(
+        self,
+    ) -> VMResult<(ChangeSet, NativeContextExtensions<'r>, Loader)> {
+        let Session {
+            data_cache,
+            native_extensions,
+            loader,
+            ..
+        } = self;
+        let change_set = data_cache
+            .into_effects(&loader)
+            .map_err(|e| e.finish(Location::Undefined))?;
+        Ok((change_set, native_extensions, loader))
     }
 
     /// Try to load a resource from remote storage and create a corresponding GlobalValue
