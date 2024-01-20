@@ -23,19 +23,19 @@ impl ModuleCache {
         }
     }
 
-    pub(crate) fn has_module_cache(&self, checksum: &Checksum) -> bool {
+    pub(crate) fn has(&self, checksum: &Checksum) -> bool {
         self.modules.contains_key(checksum)
     }
 
-    pub(crate) fn get_module_cache(&self, checksum: &Checksum) -> Option<Arc<Module>> {
+    pub(crate) fn get(&self, checksum: &Checksum) -> Option<Arc<Module>> {
         self.modules.get(checksum).cloned()
     }
 
-    pub(crate) fn remove_module_cache(&mut self, checksum: &Checksum) {
+    pub(crate) fn remove(&mut self, checksum: &Checksum) {
         self.modules.remove(checksum);
     }
 
-    pub(crate) fn insert_module(&mut self, checksum: Checksum, module: Module) -> Arc<Module> {
+    pub(crate) fn insert(&mut self, checksum: Checksum, module: Module) -> Arc<Module> {
         let module_ref = Arc::new(module);
         self.modules.insert(checksum, module_ref.clone());
 
@@ -46,7 +46,7 @@ impl ModuleCache {
         &self,
         id: &StructIdentifier,
     ) -> PartialVMResult<Arc<StructType>> {
-        self.get_module_cache(&id.checksum)
+        self.get(&id.checksum)
             .and_then(|module| {
                 let idx = module.struct_map.get(&id.name)?;
                 Some(module.structs.get(*idx)?.definition_struct_type.clone())
@@ -144,7 +144,7 @@ impl ScriptCache {
         }
     }
 
-    pub(crate) fn get_script_cache(
+    pub(crate) fn get_main(
         &self,
         checksum: &Checksum,
     ) -> Option<(Arc<Function>, Vec<Type>, Vec<Type>)> {
@@ -157,11 +157,11 @@ impl ScriptCache {
         })
     }
 
-    pub(crate) fn get_script_cache_raw(&self, checksum: &Checksum) -> Option<Arc<Script>> {
+    pub(crate) fn get(&self, checksum: &Checksum) -> Option<Arc<Script>> {
         self.scripts.get(checksum).cloned()
     }
 
-    pub(crate) fn insert_script(
+    pub(crate) fn insert(
         &mut self,
         checksum: Checksum,
         script: Script,
@@ -175,7 +175,7 @@ impl ScriptCache {
         )
     }
 
-    pub(crate) fn remove_script_cache(&mut self, checksum: &Checksum) {
+    pub(crate) fn remove(&mut self, checksum: &Checksum) {
         self.scripts.remove(checksum);
     }
 }

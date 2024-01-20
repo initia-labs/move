@@ -101,8 +101,8 @@ impl Loader {
         sha3_256.update(script_blob);
         let checksum: Checksum = sha3_256.finalize().into();
 
-        let mut script_cache = self.script_cache.write();
-        let (main, parameters, return_) = match script_cache.get_script_cache(&checksum) {
+        let mut locked_script_cache = self.script_cache.write();
+        let (main, parameters, return_) = match locked_script_cache.get_main(&checksum) {
             Some(cached) => {
                 self.script_cache_hits.write().record_hit(&checksum);
 
@@ -119,7 +119,7 @@ impl Loader {
                 .map_err(|e| e.finish(Location::Script))?;
 
                 // insert script to cache
-                let cached = script_cache.insert_script(checksum, script);
+                let cached = locked_script_cache.insert(checksum, script);
 
                 // create cache hits entry
                 if let Some(removed) = self.module_cache_hits.write().create(checksum) {
@@ -129,6 +129,9 @@ impl Loader {
                 cached
             }
         };
+
+        // explicitly drop
+        drop(locked_script_cache);
 
         // verify type arguments
         let mut type_arguments = vec![];
@@ -518,7 +521,7 @@ impl Loader {
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
     ) -> VMResult<()> {
-        let module_cache = self.module_cache.read();
+        let locked_module_cache = self.module_cache.read();
         cyclic_dependencies::verify_module(
             module,
             |module_id| {
@@ -526,8 +529,8 @@ impl Loader {
                     Some(m) => Some(m.immediate_dependencies()),
                     None => {
                         let checksum = module_storage.load_checksum(module_id)?;
-                        module_cache
-                            .get_module_cache(&checksum)
+                        locked_module_cache
+                            .get(&checksum)
                             .map(|m| m.compiled_module().immediate_dependencies())
                     }
                 }
@@ -546,8 +549,8 @@ impl Loader {
                         Some(m) => Some(m.immediate_friends()),
                         None => {
                             let checksum = module_storage.load_checksum(module_id)?;
-                            module_cache
-                                .get_module_cache(&checksum)
+                            locked_module_cache
+                                .get(&checksum)
                                 .map(|m| m.compiled_module().immediate_friends())
                         }
                     }
@@ -651,7 +654,7 @@ impl Loader {
             }
 
             type_cache.remove_type_cache_for_module(checksum);
-            module_cache.remove_module_cache(checksum);
+            module_cache.remove(checksum);
         }
 
         removed_modules.clear();
@@ -668,7 +671,7 @@ impl Loader {
                 continue;
             }
 
-            script_cache.remove_script_cache(checksum);
+            script_cache.remove(checksum);
         }
 
         removed_scripts.clear();
@@ -688,7 +691,7 @@ impl Loader {
             .load_checksum(id)
             .map_err(|e| e.finish(Location::Undefined))?;
 
-        if let Some(cached) = self.module_cache.read().get_module_cache(&checksum) {
+        if let Some(cached) = self.module_cache.read().get(&checksum) {
             self.module_cache_hits.write().record_hit(&checksum);
             return Ok(cached);
         }
@@ -805,20 +808,20 @@ impl Loader {
         )?;
 
         // if linking goes well, insert the module to the code cache
-        let mut locked_cache = self.module_cache.write();
-        let module = Module::new(&self.natives, module, &locked_cache, module_storage)
+        let mut locked_module_cache = self.module_cache.write();
+        let module = Module::new(&self.natives, module, &locked_module_cache, module_storage)
             .map_err(|e| e.finish(Location::Undefined))?;
 
         let module_id = module.id.clone();
         let checksum = module.checksum;
-        let module_ref = locked_cache.insert_module(checksum, module);
+        let module_ref = locked_module_cache.insert(checksum, module);
 
         // create type cache for module
         self.type_cache
             .write()
             .create_type_cache_for_module(module_id, checksum);
 
-        drop(locked_cache); // explicit unlock
+        drop(locked_module_cache); // explicit unlock
 
         Ok(module_ref)
     }
@@ -857,7 +860,7 @@ impl Loader {
                     .map_err(|e| e.finish(Location::Module(module_id.clone())))?;
 
                 let locked_cache = self.module_cache.read();
-                let loaded = match locked_cache.get_module_cache(&checksum) {
+                let loaded = match locked_cache.get(&checksum) {
                     None => {
                         drop(locked_cache); // explicit unlock
                         self.load_and_verify_module_and_dependencies(
@@ -964,7 +967,7 @@ impl Loader {
         //   If the module under verification declares a friend which is also in the bundle (and
         //   positioned after this module in the bundle), we defer the loading of that module when
         //   it is the module's turn in the bundle.
-        let locked_cache = self.module_cache.read();
+        let locked_module_cache = self.module_cache.read();
         let new_imm_friends: Vec<_> = friends_discovered
             .into_iter()
             .map(|mid| {
@@ -976,12 +979,12 @@ impl Loader {
             .collect::<VMResult<Vec<(ModuleId, Checksum)>>>()?
             .into_iter()
             .filter(|(mid, checksum)| {
-                !locked_cache.has_module_cache(&checksum)
+                !locked_module_cache.has(&checksum)
                     && !bundle_verified.contains_key(&mid)
                     && !bundle_unverified.contains(&mid)
             })
             .collect();
-        drop(locked_cache); // explicit unlock
+        drop(locked_module_cache); // explicit unlock
 
         for (module_id, _) in new_imm_friends {
             self.load_and_verify_module_and_dependencies_and_friends(
@@ -1084,13 +1087,13 @@ impl Loader {
     }
 
     pub(crate) fn get_module(&self, checksum: &Checksum) -> Option<Arc<Module>> {
-        self.module_cache.read().get_module_cache(checksum)
+        self.module_cache.read().get(checksum)
     }
 
     pub(crate) fn get_script(&self, checksum: &Checksum) -> Arc<Script> {
         self.script_cache
             .read()
-            .get_script_cache_raw(checksum)
+            .get(checksum)
             .expect("Script hash on Function must exist")
     }
 
@@ -1101,7 +1104,7 @@ impl Loader {
         let module = self
             .module_cache
             .read()
-            .get_module_cache(&id.checksum)
+            .get(&id.checksum)
             .ok_or_else(|| {
                 PartialVMError::new(StatusCode::LINKER_ERROR)
                     .with_message(format!("Cannot find {:?} in cache", id.checksum))
@@ -1148,8 +1151,8 @@ impl Loader {
         ty_args: &[Type],
         gas_context: &mut PseudoGasContext,
     ) -> PartialVMResult<StructTag> {
-        let type_cache = self.type_cache.read();
-        let types = type_cache.get_types(&id.checksum).ok_or_else(|| {
+        let locked_type_cache = self.type_cache.read();
+        let types = locked_type_cache.get_types(&id.checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
                 .with_message(format!("Cannot find {:?} in cache", id.checksum))
         })?;
@@ -1165,7 +1168,7 @@ impl Loader {
         }
 
         // explicitly drop
-        drop(type_cache);
+        drop(locked_type_cache);
 
         let cur_cost = gas_context.cost;
 
@@ -1256,8 +1259,8 @@ impl Loader {
         count: &mut u64,
         depth: u64,
     ) -> PartialVMResult<(MoveStructLayout, bool)> {
-        let type_cache = self.type_cache.read();
-        let types = type_cache.get_types(&id.checksum).ok_or_else(|| {
+        let locked_type_cache = self.type_cache.read();
+        let types = locked_type_cache.get_types(&id.checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
                 .with_message(format!("Cannot find {:?} in cache", id.checksum))
         })?;
@@ -1275,7 +1278,7 @@ impl Loader {
         }
 
         // explicitly drop
-        drop(type_cache);
+        drop(locked_type_cache);
 
         let count_before = *count;
         let struct_type = self.get_struct_type_by_identifier(id)?;
@@ -1313,8 +1316,8 @@ impl Loader {
         let field_node_count = *count - count_before;
         let struct_layout = MoveStructLayout::new(field_layouts);
 
-        let mut cache = self.type_cache.write();
-        let info = cache.insert_type(id, ty_args)?;
+        let mut locked_type_cache = self.type_cache.write();
+        let info = locked_type_cache.insert_type(id, ty_args)?;
         info.struct_layout_info = Some(StructLayoutInfoCacheItem {
             struct_layout: struct_layout.clone(),
             node_count: field_node_count,
@@ -1438,8 +1441,8 @@ impl Loader {
         count: &mut u64,
         depth: u64,
     ) -> PartialVMResult<MoveStructLayout> {
-        let type_cache = self.type_cache.read();
-        let types = type_cache.get_types(&id.checksum).ok_or_else(|| {
+        let locked_type_cache = self.type_cache.read();
+        let types = locked_type_cache.get_types(&id.checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
                 .with_message(format!("Cannot find {:?} in cache", id.checksum))
         })?;
@@ -1456,7 +1459,7 @@ impl Loader {
         }
 
         // explicitly drop
-        drop(type_cache);
+        drop(locked_type_cache);
 
         let struct_type = self.get_struct_type_by_identifier(&id)?;
         if struct_type.fields.len() != struct_type.field_names.len() {
@@ -1490,8 +1493,8 @@ impl Loader {
         let struct_layout = MoveStructLayout::with_types(struct_tag, field_layouts);
         let field_node_count = *count - count_before;
 
-        let mut cache = self.type_cache.write();
-        let info = cache.insert_type(id, ty_args)?;
+        let mut locked_type_cache = self.type_cache.write();
+        let info = locked_type_cache.insert_type(id, ty_args)?;
         info.annotated_struct_layout = Some(struct_layout.clone());
         info.annotated_node_count = Some(field_node_count);
 
@@ -1542,8 +1545,8 @@ impl Loader {
         &self,
         id: &StructIdentifier,
     ) -> PartialVMResult<DepthFormula> {
-        let type_cache = self.type_cache.read();
-        let types = type_cache.get_types(&id.checksum).ok_or_else(|| {
+        let locked_type_cache = self.type_cache.read();
+        let types = locked_type_cache.get_types(&id.checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
                 .with_message(format!("Cannot find {:?} in cache", id.checksum))
         })?;
@@ -1552,7 +1555,7 @@ impl Loader {
         }
 
         // explicitly drop
-        drop(type_cache);
+        drop(locked_type_cache);
 
         let struct_type = self.get_struct_type_by_identifier(id)?;
 
