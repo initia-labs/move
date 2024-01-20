@@ -857,7 +857,7 @@ impl Loader {
             } else {
                 let checksum = module_storage
                     .load_checksum(&module_id)
-                    .map_err(|e| e.finish(Location::Module(module_id.clone())))?;
+                    .map_err(|e| e.finish(Location::Undefined))?;
 
                 let locked_cache = self.module_cache.read();
                 let loaded = match locked_cache.get(&checksum) {
@@ -974,7 +974,7 @@ impl Loader {
                 module_storage
                     .load_checksum(&mid)
                     .and_then(|checksum| Ok((mid.clone(), checksum)))
-                    .map_err(|e| e.finish(Location::Module(mid)))
+                    .map_err(|e| e.finish(Location::Undefined))
             })
             .collect::<VMResult<Vec<(ModuleId, Checksum)>>>()?
             .into_iter()
