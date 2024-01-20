@@ -1,11 +1,3 @@
-// Copyright (c) The Diem Core Contributors
-// Copyright (c) The Move Contributors
-// SPDX-License-Identifier: Apache-2.0
-
-use crate::{
-    loader::{Loader, Module, Resolver, ScriptHash},
-    native_functions::{NativeFunction, NativeFunctions, UnboxedNativeFunction},
-};
 use move_binary_format::{
     access::ModuleAccess,
     errors::{PartialVMError, PartialVMResult},
@@ -15,11 +7,15 @@ use move_core_types::{identifier::Identifier, language_storage::ModuleId, vm_sta
 use move_vm_types::loaded_data::runtime_types::Type;
 use std::{fmt::Debug, sync::Arc};
 
+use crate::native_functions::{NativeFunction, NativeFunctions, UnboxedNativeFunction};
+
+use super::{module::Module, resolver::Resolver, store::ModuleStorage, Checksum, Loader};
+
 // A simple wrapper for the "owner" of the function (Module or Script)
 #[derive(Clone, Debug)]
 pub(crate) enum Scope {
-    Module(ModuleId),
-    Script(ScriptHash),
+    Module((ModuleId, Checksum)),
+    Script(Checksum),
 }
 
 // A runtime function
@@ -63,8 +59,9 @@ impl Function {
         natives: &NativeFunctions,
         index: FunctionDefinitionIndex,
         module: &CompiledModule,
+        module_storage: &dyn ModuleStorage,
         signature_table: &[Vec<Type>],
-    ) -> Self {
+    ) -> PartialVMResult<Self> {
         let def = module.function_def_at(index);
         let handle = module.function_handle_at(def.function);
         let name = module.identifier_at(handle.name).to_owned();
@@ -85,12 +82,16 @@ impl Function {
         } else {
             (None, false)
         };
-        let scope = Scope::Module(module_id);
+
+        let checksum: Checksum = module_storage.load_checksum(&module_id)?;
+        let scope = Scope::Module((module_id, checksum));
+
         // Native functions do not have a code unit
         let code = match &def.code {
             Some(code) => code.code.clone(),
             None => vec![],
         };
+
         let type_parameters = handle.type_parameters.clone();
         let return_types = signature_table[handle.return_.0 as usize].clone();
         let local_types = if let Some(code) = &def.code {
@@ -103,7 +104,7 @@ impl Function {
 
         let parameter_types = signature_table[handle.parameters.0 as usize].clone();
 
-        Self {
+        Ok(Self {
             file_format_version: module.version(),
             index,
             code,
@@ -116,7 +117,7 @@ impl Function {
             local_types,
             return_types,
             parameter_types,
-        }
+        })
     }
 
     #[allow(unused)]
@@ -126,7 +127,7 @@ impl Function {
 
     pub(crate) fn module_id(&self) -> Option<&ModuleId> {
         match &self.scope {
-            Scope::Module(module_id) => Some(module_id),
+            Scope::Module((id, _)) => Some(id),
             Scope::Script(_) => None,
         }
     }
@@ -137,16 +138,16 @@ impl Function {
 
     pub(crate) fn get_resolver<'a>(&self, loader: &'a Loader) -> Resolver<'a> {
         match &self.scope {
-            Scope::Module(module_id) => {
+            Scope::Module((_, checksum)) => {
                 let module = loader
-                    .get_module(module_id)
+                    .get_module(checksum)
                     .expect("ModuleId on Function must exist");
                 Resolver::for_module(loader, module)
-            },
+            }
             Scope::Script(script_hash) => {
                 let script = loader.get_script(script_hash);
                 Resolver::for_script(loader, script)
-            },
+            }
         }
     }
 
@@ -189,7 +190,7 @@ impl Function {
     pub(crate) fn pretty_string(&self) -> String {
         match &self.scope {
             Scope::Script(_) => "Script::main".into(),
-            Scope::Module(id) => format!(
+            Scope::Module((id, _)) => format!(
                 "0x{}::{}::{}",
                 id.address().to_hex(),
                 id.name().as_str(),
@@ -233,5 +234,5 @@ pub(crate) struct FunctionInstantiation {
 #[derive(Clone, Debug)]
 pub(crate) enum FunctionHandle {
     Local(Arc<Function>),
-    Remote { module: ModuleId, name: Identifier },
+    Remote { module: Checksum, name: Identifier },
 }

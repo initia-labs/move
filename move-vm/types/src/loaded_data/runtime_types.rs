@@ -116,7 +116,7 @@ impl DepthFormula {
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct StructType {
-    pub idx: StructNameIndex,
+    pub id: StructIdentifier,
     pub fields: Vec<Type>,
     pub field_names: Vec<Identifier>,
     pub phantom_ty_args_mask: SmallBitVec,
@@ -160,12 +160,12 @@ impl StructType {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct StructNameIndex(pub usize);
+pub type Checksum = [u8; 32];
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StructIdentifier {
-    pub module: ModuleId,
+    pub module_id: ModuleId,
+    pub checksum: Checksum,
     pub name: Identifier,
 }
 
@@ -179,11 +179,11 @@ pub enum Type {
     Signer,
     Vector(TriompheArc<Type>),
     Struct {
-        idx: StructNameIndex,
+        id: StructIdentifier,
         ability: AbilityInfo,
     },
     StructInstantiation {
-        idx: StructNameIndex,
+        id: StructIdentifier,
         ty_args: TriompheArc<Vec<Type>>,
         ability: AbilityInfo,
     },
@@ -262,13 +262,13 @@ impl Type {
             Type::Reference(ty) => Type::Reference(Box::new(ty.apply_subst(subst, depth + 1)?)),
             Type::MutableReference(ty) => {
                 Type::MutableReference(Box::new(ty.apply_subst(subst, depth + 1)?))
-            },
-            Type::Struct { idx, ability } => Type::Struct {
-                idx: *idx,
+            }
+            Type::Struct { id, ability } => Type::Struct {
+                id: id.clone(),
                 ability: ability.clone(),
             },
             Type::StructInstantiation {
-                idx,
+                id,
                 ty_args: instantiation,
                 ability,
             } => {
@@ -277,11 +277,11 @@ impl Type {
                     inst.push(ty.apply_subst(subst, depth + 1)?)
                 }
                 Type::StructInstantiation {
-                    idx: *idx,
+                    id: id.clone(),
                     ty_args: TriompheArc::new(inst),
                     ability: ability.clone(),
                 }
-            },
+            }
         };
         Ok(res)
     }
@@ -313,7 +313,7 @@ impl Type {
         match self {
             TyParam(_) | Bool | U8 | U16 | U32 | U64 | U128 | U256 | Address | Signer => {
                 Self::LEGACY_BASE_MEMORY_SIZE
-            },
+            }
             Reference(ty) | MutableReference(ty) => Self::LEGACY_BASE_MEMORY_SIZE + ty.size(),
             Vector(ty) => Self::LEGACY_BASE_MEMORY_SIZE + ty.size(),
             Struct { .. } => Self::LEGACY_BASE_MEMORY_SIZE,
@@ -343,14 +343,14 @@ impl Type {
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message("Unable to load const type signature".to_string()),
                 )
-            },
+            }
             // Not allowed/Not meaningful
             S::TypeParameter(_) | S::Reference(_) | S::MutableReference(_) | S::Signer => {
                 return Err(
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message("Unable to load const type signature".to_string()),
                 )
-            },
+            }
         })
     }
 
@@ -404,7 +404,7 @@ impl Type {
         match self {
             Type::MutableReference(inner) | Type::Reference(inner) => {
                 inner.check_eq(expected_inner)
-            },
+            }
             _ => Err(
                 PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                     .with_message("VecMutBorrow expects a vector reference".to_string()),
@@ -431,11 +431,11 @@ impl Type {
                 "Unexpected TyParam type after translating from TypeTag to Type".to_string(),
             )),
 
-            Type::Vector(ty) => {
-                AbilitySet::polymorphic_abilities(AbilitySet::VECTOR, vec![false], vec![
-                    ty.abilities()?
-                ])
-            },
+            Type::Vector(ty) => AbilitySet::polymorphic_abilities(
+                AbilitySet::VECTOR,
+                vec![false],
+                vec![ty.abilities()?],
+            ),
             Type::Struct { ability, .. } => Ok(ability.base_ability_set),
             Type::StructInstantiation {
                 ty_args,
@@ -455,7 +455,7 @@ impl Type {
                     phantom_ty_args_mask.iter(),
                     type_argument_abilities,
                 )
-            },
+            }
         }
     }
 }

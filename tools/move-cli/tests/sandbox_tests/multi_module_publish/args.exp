@@ -1,9 +1,11 @@
 Command `sandbox publish --bundle --override-ordering A -v`:
 Found 2 modules
-Invalid multi-module publishing: VMError with status LINKER_ERROR at location UNDEFINED and message Linker Error: Cannot find ModuleId { address: 0000000000000000000000000000000000000000000000000000000000000002, name: Identifier("B") } in data cache
+Invalid multi-module publishing: VMError with status LINKER_ERROR at location Module ModuleId { address: 0000000000000000000000000000000000000000000000000000000000000002, name: Identifier("B") } and message Linker Error: Cannot find checksum of ModuleId { address: 0000000000000000000000000000000000000000000000000000000000000002, name: Identifier("B") } in data cache
+Unable to locate the module in the multi-module publishing error
 Command `sandbox publish --bundle --override-ordering B -v`:
 Found 2 modules
-Invalid multi-module publishing: VMError with status LINKER_ERROR at location UNDEFINED and message Linker Error: Cannot find ModuleId { address: 0000000000000000000000000000000000000000000000000000000000000002, name: Identifier("A") } in data cache
+Invalid multi-module publishing: VMError with status LINKER_ERROR at location Module ModuleId { address: 0000000000000000000000000000000000000000000000000000000000000002, name: Identifier("A") } and message Linker Error: Cannot find checksum of ModuleId { address: 0000000000000000000000000000000000000000000000000000000000000002, name: Identifier("A") } in data cache
+Unable to locate the module in the multi-module publishing error
 Command `sandbox publish --bundle --override-ordering B --override-ordering A -v`:
 Found 2 modules
 Invalid multi-module publishing: VMError with status LINKER_ERROR at location UNDEFINED and message Linker Error: Cannot find ModuleId { address: 0000000000000000000000000000000000000000000000000000000000000002, name: Identifier("A") } in data cache

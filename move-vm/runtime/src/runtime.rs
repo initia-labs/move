@@ -3,10 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    config::VMConfig,
     data_cache::TransactionDataCache,
     interpreter::Interpreter,
-    loader::{Function, LoadedFunction, Loader},
+    loader::{Function, LoadedFunction, Loader, ModuleStorageForVerify},
     native_extensions::NativeContextExtensions,
+    native_functions::{NativeFunction, NativeFunctions},
     session::{LoadedFunctionInstantiation, SerializedReturnValues},
 };
 use move_binary_format::{
@@ -19,25 +21,36 @@ use move_binary_format::{
 use move_bytecode_verifier::script_signature;
 use move_core_types::{
     account_address::AccountAddress,
-    identifier::IdentStr,
+    identifier::{IdentStr, Identifier},
     language_storage::{ModuleId, TypeTag},
     value::MoveTypeLayout,
     vm_status::StatusCode,
 };
 use move_vm_types::{
     gas::GasMeter,
-    loaded_data::runtime_types::Type,
+    loaded_data::runtime_types::{Checksum, Type},
     values::{Locals, Reference, VMValueCast, Value},
 };
-use std::{borrow::Borrow, collections::BTreeSet, sync::Arc};
+use sha3::{Digest, Sha3_256};
+use std::{
+    borrow::Borrow,
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 /// An instantiation of the MoveVM.
-#[derive(Clone)]
-pub(crate) struct VMRuntime {}
+pub(crate) struct VMRuntime {
+    pub(crate) loader: Loader,
+}
 
 impl VMRuntime {
-    pub(crate) fn new() -> Self {
-        VMRuntime {}
+    pub(crate) fn new(
+        natives: impl IntoIterator<Item = (AccountAddress, Identifier, Identifier, NativeFunction)>,
+        vm_config: VMConfig,
+    ) -> PartialVMResult<Self> {
+        Ok(VMRuntime {
+            loader: Loader::new(NativeFunctions::new(natives)?, vm_config),
+        })
     }
 
     pub(crate) fn publish_module_bundle(
@@ -49,15 +62,27 @@ impl VMRuntime {
         _gas_meter: &mut impl GasMeter,
         compat: Compatibility,
     ) -> VMResult<()> {
+        // make checksum records for the publishing modules
+        let mut checksums: HashMap<ModuleId, Checksum> = HashMap::new();
+
         // deserialize the modules. Perform bounds check. After this indexes can be
         // used with the `[]` operator
         let compiled_modules = match modules
             .iter()
             .map(|blob| {
+                let mut sha3_256 = Sha3_256::new();
+                sha3_256.update(blob);
+                let checksum: [u8; 32] = sha3_256.finalize().into();
+
                 CompiledModule::deserialize_with_config(
                     blob,
                     &loader.vm_config().deserializer_config,
                 )
+                .map(|m| {
+                    checksums.insert(m.self_id(), checksum);
+
+                    m
+                })
             })
             .collect::<PartialVMResult<Vec<_>>>()
         {
@@ -99,7 +124,7 @@ impl VMRuntime {
 
             if data_store.exists_module(&module_id)? && compat.need_check_compat() {
                 let old_module_ref = loader.load_module(&module_id, data_store)?;
-                let old_module = old_module_ref.module();
+                let old_module = old_module_ref.compiled_module();
                 let old_m = normalized::Module::new(old_module);
                 let new_m = normalized::Module::new(module);
                 compat
@@ -113,7 +138,10 @@ impl VMRuntime {
         }
 
         // Perform bytecode and loading verification. Modules must be sorted in topological order.
-        loader.verify_module_bundle_for_publication(&compiled_modules, data_store)?;
+        loader.verify_module_bundle_for_publication(
+            &compiled_modules,
+            &ModuleStorageForVerify::new(&data_store, checksums),
+        )?;
 
         // NOTE: we want to (informally) argue that all modules pass the linking check before being
         // published to the data store.
@@ -452,7 +480,7 @@ impl VMRuntime {
         let LoadedFunction { module, function } = func;
 
         script_signature::verify_module_function_signature_by_name(
-            module.module(),
+            module.compiled_module(),
             IdentStr::new(function.as_ref().name()).expect(""),
             additional_signature_checks,
         )?;

@@ -40,7 +40,7 @@ impl ModuleResolver for BlankStorage {
         vec![]
     }
 
-    fn get_module_checksum(&self, _module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
+    fn get_checksum(&self, _module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
         Ok(None)
     }
 
@@ -86,14 +86,14 @@ pub struct DeltaStorage<'a, 'b, S> {
 impl<'a, 'b, S: ModuleResolver> ModuleResolver for DeltaStorage<'a, 'b, S> {
     type Error = S::Error;
 
-    fn get_module_checksum(&self, module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
+    fn get_checksum(&self, module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
         if let Some(account_storage) = self.change_set.accounts().get(module_id.address()) {
             if let Some(blob_opt) = account_storage.checksums().get(module_id.name()) {
                 return Ok(blob_opt.clone().ok());
             }
         }
 
-        self.base.get_module_checksum(module_id)
+        self.base.get_checksum(module_id)
     }
 
     fn get_module_metadata(&self, _module_id: &ModuleId) -> Vec<Metadata> {
@@ -340,7 +340,7 @@ impl InMemoryStorage {
 impl ModuleResolver for InMemoryStorage {
     type Error = PartialVMError;
 
-    fn get_module_checksum(&self, module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
+    fn get_checksum(&self, module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
         if let Some(account_storage) = self.accounts.get(module_id.address()) {
             return Ok(account_storage.checksums.get(module_id.name()).cloned());
         }

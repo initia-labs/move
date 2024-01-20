@@ -2,7 +2,7 @@
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::loader::Loader;
+use crate::loader::{Loader, ModuleStorage};
 use bytes::Bytes;
 use move_binary_format::errors::*;
 use move_core_types::{
@@ -57,6 +57,16 @@ impl AccountDataCache {
 pub struct TransactionDataCache<'r> {
     remote: &'r dyn MoveResolver<PartialVMError>,
     account_map: BTreeMap<AccountAddress, AccountDataCache>,
+}
+
+impl<'r> ModuleStorage for TransactionDataCache<'r> {
+    fn load_module(&self, module_id: &ModuleId) -> PartialVMResult<Bytes> {
+        self.load_module(module_id)
+    }
+
+    fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<[u8; 32]> {
+        self.load_checksum(module_id)
+    }
 }
 
 impl<'r> TransactionDataCache<'r> {
@@ -194,9 +204,10 @@ impl<'r> TransactionDataCache<'r> {
             let (ty_layout, has_aggregator_lifting) =
                 loader.type_to_type_layout_with_identifier_mappings(ty)?;
 
-            let module = loader.get_module(&ty_tag.module_id());
+            let checksum = self.load_checksum(&ty_tag.module_id())?;
+            let module = loader.get_module(&checksum);
             let metadata: &[Metadata] = match &module {
-                Some(module) => &module.module().metadata,
+                Some(module) => &module.compiled_module().metadata,
                 None => &[],
             };
 
@@ -234,13 +245,17 @@ impl<'r> TransactionDataCache<'r> {
                 None => GlobalValue::none(),
             };
 
-            account_cache
+            self.account_map
+                .get_mut(&addr)
+                .unwrap()
                 .data_map
                 .insert(ty.clone(), (ty_layout, gv, has_aggregator_lifting));
         }
 
         Ok((
-            account_cache
+            self.account_map
+                .get_mut(&addr)
+                .unwrap()
                 .data_map
                 .get_mut(ty)
                 .map(|(_ty_layout, gv, _has_aggregator_lifting)| gv)
@@ -260,6 +275,25 @@ impl<'r> TransactionDataCache<'r> {
             None => Err(
                 PartialVMError::new(StatusCode::LINKER_ERROR).with_message(format!(
                     "Linker Error: Cannot find {:?} in data cache",
+                    module_id
+                )),
+            ),
+        }
+    }
+
+    pub(crate) fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<[u8; 32]> {
+        if let Some(account_cache) = self.account_map.get(module_id.address()) {
+            if let Some((blob, _is_republishing)) = account_cache.checksum_map.get(module_id.name())
+            {
+                return Ok(blob.clone());
+            }
+        }
+
+        match self.remote.get_checksum(module_id)? {
+            Some(bytes) => Ok(bytes),
+            None => Err(
+                PartialVMError::new(StatusCode::LINKER_ERROR).with_message(format!(
+                    "Linker Error: Cannot find checksum of {:?} in data cache",
                     module_id
                 )),
             ),
