@@ -139,7 +139,7 @@ impl Module {
                 let module_id = module.module_id_for_handle(module_handle);
 
                 let mut id = StructIdentifier {
-                    module_id: id.clone(),
+                    module_id: module_id.clone(),
                     checksum,
                     name: struct_name.to_owned(),
                 };
