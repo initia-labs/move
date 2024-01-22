@@ -31,7 +31,7 @@ use move_vm_types::{
     },
     views::TypeView,
 };
-use std::{cmp::min, collections::VecDeque, fmt::Write, sync::Arc};
+use std::{cmp::min, collections::VecDeque, fmt::Write, sync::Arc, borrow::Borrow};
 
 macro_rules! set_err_info {
     ($frame:ident, $e:expr) => {{
@@ -537,6 +537,7 @@ impl Interpreter {
     ) -> PartialVMResult<&'c mut GlobalValue> {
         match data_store.load_resource(loader, addr, ty) {
             Ok((gv, load_res)) => {
+                println!("DEBUG MESSAGE {:?}", &gv);
                 if let Some(bytes_loaded) = load_res {
                     gas_meter.charge_load_resource(
                         addr,
