@@ -293,7 +293,7 @@ impl<'r> TransactionDataCache<'r> {
             Some(bytes) => Ok(bytes),
             None => Err(
                 PartialVMError::new(StatusCode::LINKER_ERROR).with_message(format!(
-                    "Linker Error: Cannot find checksum of {:?} in data cache",
+                    "Linker Error: Cannot find {:?} in data cache",
                     module_id
                 )),
             ),
