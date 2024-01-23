@@ -12,9 +12,8 @@ use move_vm_types::loaded_data::runtime_types::{StructIdentifier, Type};
 use super::{
     cache::ModuleCache,
     function::{Function, FunctionHandle, FunctionInstantiation, Scope},
-    store::ModuleStorage,
     type_loader::intern_type,
-    Checksum,
+    Checksum, ChecksumStorage,
 };
 
 // A Script is very similar to a `CompiledScript` but data is "transformed" to a representation
@@ -50,7 +49,7 @@ impl Script {
         script: CompiledScript,
         script_hash: &Checksum,
         module_cache: &ModuleCache,
-        module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<Self> {
         let mut struct_names = vec![];
         for struct_handle in script.struct_handles() {
@@ -58,15 +57,13 @@ impl Script {
             let module_handle = script.module_handle_at(struct_handle.module);
             let module_id = script.module_id_for_handle(module_handle);
 
-            let checksum = module_storage.load_checksum(&module_id)?;
             let id = StructIdentifier {
                 module_id,
-                checksum,
                 name: struct_name.to_owned(),
             };
 
             module_cache
-                .get_struct_type_by_identifier(&id)?
+                .get_struct_type_by_identifier(&id, checksum_storage)?
                 .check_compatibility(struct_handle)?;
 
             struct_names.push(id);
@@ -80,9 +77,8 @@ impl Script {
                 *script.address_identifier_at(module_handle.address),
                 script.identifier_at(module_handle.name).to_owned(),
             );
-            let checksum = module_storage.load_checksum(&module_id)?;
             function_refs.push(FunctionHandle::Remote {
-                module: checksum,
+                module_id,
                 name: func_name.to_owned(),
             });
         }

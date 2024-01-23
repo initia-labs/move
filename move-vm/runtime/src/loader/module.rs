@@ -26,8 +26,8 @@ use crate::native_functions::NativeFunctions;
 use super::{
     cache::ModuleCache,
     function::{Function, FunctionHandle, FunctionInstantiation},
-    store::ModuleStorage,
     type_loader::intern_type,
+    ChecksumStorage,
 };
 
 // A Module is very similar to a binary Module but data is "transformed" to a representation
@@ -113,10 +113,10 @@ impl Module {
         natives: &NativeFunctions,
         module: CompiledModule,
         module_cache: &ModuleCache,
-        module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<Self> {
         let id = module.self_id();
-        let checksum = module_storage.load_checksum(&id)?;
+        let checksum = checksum_storage.load_checksum(&id)?;
 
         let mut structs = vec![];
         let mut struct_instantiations = vec![];
@@ -138,16 +138,14 @@ impl Module {
                 let module_handle = module.module_handle_at(struct_handle.module);
                 let module_id = module.module_id_for_handle(module_handle);
 
-                let mut id = StructIdentifier {
+                let id = StructIdentifier {
                     module_id: module_id.clone(),
-                    checksum,
                     name: struct_name.to_owned(),
                 };
 
                 if module_handle != module.self_handle() {
-                    id.checksum = module_storage.load_checksum(&module_id)?;
                     module_cache
-                        .get_struct_type_by_identifier(&id)?
+                        .get_struct_type_by_identifier(&id, checksum_storage)?
                         .check_compatibility(struct_handle)?;
                 }
 
@@ -192,16 +190,11 @@ impl Module {
 
             for (idx, func) in module.function_defs().iter().enumerate() {
                 let findex = FunctionDefinitionIndex(idx as TableIndex);
-                let function = match Function::new(
-                    natives,
-                    findex,
-                    &module,
-                    module_storage,
-                    signature_table.as_slice(),
-                ) {
-                    Ok(f) => f,
-                    Err(e) => return Err(e),
-                };
+                let function =
+                    match Function::new(natives, findex, &module, signature_table.as_slice()) {
+                        Ok(f) => f,
+                        Err(e) => return Err(e),
+                    };
 
                 function_map.insert(function.name.to_owned(), idx);
                 function_defs.push(Arc::new(function));
@@ -262,7 +255,7 @@ impl Module {
                     )
                 } else {
                     FunctionHandle::Remote {
-                        module: module_storage.load_checksum(&module_id)?,
+                        module_id,
                         name: func_name.to_owned(),
                     }
                 };

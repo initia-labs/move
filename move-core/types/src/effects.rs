@@ -357,7 +357,7 @@ impl<Module, Checksum, Resource> Changes<Module, Checksum, Resource> {
 }
 
 // These aliases are necessary because AccountChangeSet and ChangeSet were not
-// generic before. In order to minimise the code changes we alias new generic
+// generic before. In order to minimize the code changes we alias new generic
 // types.
 pub type AccountChangeSet = AccountChanges<Bytes, [u8; 32], Bytes>;
 pub type ChangeSet = Changes<Bytes, [u8; 32], Bytes>;

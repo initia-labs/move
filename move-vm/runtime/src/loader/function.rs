@@ -9,12 +9,12 @@ use std::{fmt::Debug, sync::Arc};
 
 use crate::native_functions::{NativeFunction, NativeFunctions, UnboxedNativeFunction};
 
-use super::{module::Module, resolver::Resolver, store::ModuleStorage, Checksum, Loader};
+use super::{module::Module, resolver::Resolver, Checksum, ChecksumStorage, Loader};
 
 // A simple wrapper for the "owner" of the function (Module or Script)
 #[derive(Clone, Debug)]
 pub(crate) enum Scope {
-    Module((ModuleId, Checksum)),
+    Module(ModuleId),
     Script(Checksum),
 }
 
@@ -59,7 +59,6 @@ impl Function {
         natives: &NativeFunctions,
         index: FunctionDefinitionIndex,
         module: &CompiledModule,
-        module_storage: &dyn ModuleStorage,
         signature_table: &[Vec<Type>],
     ) -> PartialVMResult<Self> {
         let def = module.function_def_at(index);
@@ -83,8 +82,7 @@ impl Function {
             (None, false)
         };
 
-        let checksum: Checksum = module_storage.load_checksum(&module_id)?;
-        let scope = Scope::Module((module_id, checksum));
+        let scope = Scope::Module(module_id);
 
         // Native functions do not have a code unit
         let code = match &def.code {
@@ -127,7 +125,7 @@ impl Function {
 
     pub(crate) fn module_id(&self) -> Option<&ModuleId> {
         match &self.scope {
-            Scope::Module((id, _)) => Some(id),
+            Scope::Module(id) => Some(id),
             Scope::Script(_) => None,
         }
     }
@@ -136,11 +134,16 @@ impl Function {
         self.index
     }
 
-    pub(crate) fn get_resolver<'a>(&self, loader: &'a Loader) -> Resolver<'a> {
+    pub(crate) fn get_resolver<'a>(
+        &self,
+        loader: &'a Loader,
+        checksum_storage: &dyn ChecksumStorage,
+    ) -> Resolver<'a> {
         match &self.scope {
-            Scope::Module((_, checksum)) => {
+            Scope::Module(module_id) => {
                 let module = loader
-                    .get_module(checksum)
+                    .get_module(module_id, checksum_storage)
+                    .expect("ModuleId on Function must exist")
                     .expect("ModuleId on Function must exist");
                 Resolver::for_module(loader, module)
             }
@@ -190,7 +193,7 @@ impl Function {
     pub(crate) fn pretty_string(&self) -> String {
         match &self.scope {
             Scope::Script(_) => "Script::main".into(),
-            Scope::Module((id, _)) => format!(
+            Scope::Module(id) => format!(
                 "0x{}::{}::{}",
                 id.address().to_hex(),
                 id.name().as_str(),
@@ -234,5 +237,8 @@ pub(crate) struct FunctionInstantiation {
 #[derive(Clone, Debug)]
 pub(crate) enum FunctionHandle {
     Local(Arc<Function>),
-    Remote { module: Checksum, name: Identifier },
+    Remote {
+        module_id: ModuleId,
+        name: Identifier,
+    },
 }

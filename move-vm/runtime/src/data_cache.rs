@@ -2,7 +2,10 @@
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::loader::{Loader, ModuleStorage};
+use crate::{
+    checksum_cache::TransactionChecksumCache,
+    loader::{Loader, ModuleStorage},
+};
 use bytes::Bytes;
 use move_binary_format::errors::*;
 use move_core_types::{
@@ -20,23 +23,22 @@ use move_vm_types::{
     loaded_data::runtime_types::Type,
     values::{GlobalValue, Value},
 };
-use sha3::{Digest, Sha3_256};
 use std::collections::btree_map::BTreeMap;
 
 pub struct AccountDataCache {
     // The bool flag in the `data_map` indicates whether the resource contains
     // an aggregator or snapshot.
     data_map: BTreeMap<Type, (MoveTypeLayout, GlobalValue, bool)>,
-    module_map: BTreeMap<Identifier, (Bytes, bool)>,
     checksum_map: BTreeMap<Identifier, ([u8; 32], bool)>,
+    module_map: BTreeMap<Identifier, (Bytes, bool)>,
 }
 
 impl AccountDataCache {
     fn new() -> Self {
         Self {
             data_map: BTreeMap::new(),
-            module_map: BTreeMap::new(),
             checksum_map: BTreeMap::new(),
+            module_map: BTreeMap::new(),
         }
     }
 }
@@ -63,10 +65,6 @@ impl<'r> ModuleStorage for TransactionDataCache<'r> {
     fn load_module(&self, module_id: &ModuleId) -> PartialVMResult<Bytes> {
         self.load_module(module_id)
     }
-
-    fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<[u8; 32]> {
-        self.load_checksum(module_id)
-    }
 }
 
 impl<'r> TransactionDataCache<'r> {
@@ -83,7 +81,11 @@ impl<'r> TransactionDataCache<'r> {
     /// published modules.
     ///
     /// Gives all proper guarantees on lifetime of global data as well.
-    pub(crate) fn into_effects(self, loader: &Loader) -> PartialVMResult<ChangeSet> {
+    pub(crate) fn into_effects(
+        self,
+        loader: &Loader,
+        checksum_store: &TransactionChecksumCache,
+    ) -> PartialVMResult<ChangeSet> {
         let resource_converter =
             |value: Value, layout: MoveTypeLayout, _: bool| -> PartialVMResult<Bytes> {
                 value
@@ -94,7 +96,7 @@ impl<'r> TransactionDataCache<'r> {
                             .with_message(format!("Error when serializing resource {}.", value))
                     })
             };
-        self.into_custom_effects(&resource_converter, loader)
+        self.into_custom_effects(&resource_converter, loader, checksum_store)
     }
 
     /// Same like `into_effects`, but also allows clients to select the format of
@@ -103,8 +105,10 @@ impl<'r> TransactionDataCache<'r> {
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
         loader: &Loader,
+        checksum_store: &TransactionChecksumCache,
     ) -> PartialVMResult<Changes<Bytes, [u8; 32], Resource>> {
         let mut change_set = Changes::<Bytes, [u8; 32], Resource>::new();
+
         for (addr, account_data_cache) in self.account_map.into_iter() {
             let mut modules = BTreeMap::new();
             for (module_name, (module_blob, is_republishing)) in account_data_cache.module_map {
@@ -116,20 +120,10 @@ impl<'r> TransactionDataCache<'r> {
                 modules.insert(module_name, op);
             }
 
-            let mut checksums = BTreeMap::new();
-            for (module_name, (checksum, is_republishing)) in account_data_cache.checksum_map {
-                let op = if is_republishing {
-                    Op::Modify(checksum)
-                } else {
-                    Op::New(checksum)
-                };
-                checksums.insert(module_name, op);
-            }
-
             let mut resources = BTreeMap::new();
             for (ty, (layout, gv, has_aggregator_lifting)) in account_data_cache.data_map {
                 if let Some(op) = gv.into_effect_with_layout(layout) {
-                    let struct_tag = match loader.type_to_type_tag(&ty)? {
+                    let struct_tag = match loader.type_to_type_tag(&ty, checksum_store)? {
                         TypeTag::Struct(struct_tag) => *struct_tag,
                         _ => return Err(PartialVMError::new(StatusCode::INTERNAL_TYPE_ERROR)),
                     };
@@ -141,7 +135,18 @@ impl<'r> TransactionDataCache<'r> {
                     );
                 }
             }
-            if !modules.is_empty() || !resources.is_empty() {
+
+            let mut checksums = BTreeMap::new();
+            for (module_name, (checksum, is_republishing)) in &account_data_cache.checksum_map {
+                let op = if *is_republishing {
+                    Op::Modify(*checksum)
+                } else {
+                    Op::New(*checksum)
+                };
+                checksums.insert(module_name.clone(), op);
+            }
+
+            if !modules.is_empty() || !resources.is_empty() || !checksums.is_empty() {
                 change_set
                     .add_account_changeset(
                         addr,
@@ -183,6 +188,7 @@ impl<'r> TransactionDataCache<'r> {
     pub(crate) fn load_resource(
         &mut self,
         loader: &Loader,
+        checksum_store: &TransactionChecksumCache,
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<(&mut GlobalValue, Option<NumBytes>)> {
@@ -192,7 +198,7 @@ impl<'r> TransactionDataCache<'r> {
 
         let mut load_res = None;
         if !account_cache.data_map.contains_key(ty) {
-            let ty_tag = match loader.type_to_type_tag(ty)? {
+            let ty_tag = match loader.type_to_type_tag(ty, checksum_store)? {
                 TypeTag::Struct(s_tag) => s_tag,
                 _ =>
                 // non-struct top-level value; can't happen
@@ -202,10 +208,9 @@ impl<'r> TransactionDataCache<'r> {
             };
             // TODO(Gas): Shall we charge for this?
             let (ty_layout, has_aggregator_lifting) =
-                loader.type_to_type_layout_with_identifier_mappings(ty)?;
+                loader.type_to_type_layout_with_identifier_mappings(ty, checksum_store)?;
 
-            let checksum = self.load_checksum(&ty_tag.module_id())?;
-            let module = loader.get_module(&checksum);
+            let module = loader.get_module(&ty_tag.module_id(), checksum_store)?;
             let metadata: &[Metadata] = match &module {
                 Some(module) => &module.compiled_module().metadata,
                 None => &[],
@@ -281,40 +286,17 @@ impl<'r> TransactionDataCache<'r> {
         }
     }
 
-    pub(crate) fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<[u8; 32]> {
-        if let Some(account_cache) = self.account_map.get(module_id.address()) {
-            if let Some((blob, _is_republishing)) = account_cache.checksum_map.get(module_id.name())
-            {
-                return Ok(blob.clone());
-            }
-        }
-
-        match self.remote.get_checksum(module_id)? {
-            Some(bytes) => Ok(bytes),
-            None => Err(
-                PartialVMError::new(StatusCode::LINKER_ERROR).with_message(format!(
-                    "Linker Error: Cannot find {:?} in data cache",
-                    module_id
-                )),
-            ),
-        }
-    }
-
     pub(crate) fn publish_module(
         &mut self,
         module_id: &ModuleId,
         blob: Vec<u8>,
+        checksum: [u8; 32],
         is_republishing: bool,
     ) -> VMResult<()> {
         let account_cache =
             Self::get_mut_or_insert_with(&mut self.account_map, module_id.address(), || {
                 (*module_id.address(), AccountDataCache::new())
             });
-
-        // compute checksum
-        let mut sha3_256 = Sha3_256::new();
-        sha3_256.update(&blob);
-        let checksum: [u8; 32] = sha3_256.finalize().into();
 
         account_cache
             .module_map

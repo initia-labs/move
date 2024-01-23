@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    checksum_cache::TransactionChecksumCache,
     data_cache::TransactionDataCache,
-    loader::{Function, Loader, Resolver},
+    loader::{ChecksumStorage, Function, Loader, Resolver},
     native_extensions::NativeContextExtensions,
     native_functions::NativeContext,
     trace,
@@ -31,7 +32,7 @@ use move_vm_types::{
     },
     views::TypeView,
 };
-use std::{cmp::min, collections::VecDeque, fmt::Write, sync::Arc, borrow::Borrow};
+use std::{cmp::min, collections::VecDeque, fmt::Write, sync::Arc};
 
 macro_rules! set_err_info {
     ($frame:ident, $e:expr) => {{
@@ -53,14 +54,17 @@ pub(crate) struct Interpreter {
     paranoid_type_checks: bool,
 }
 
-struct TypeWithLoader<'a, 'b> {
+struct TypeWithLoader<'a, 'b, 'c> {
     ty: &'a Type,
     loader: &'b Loader,
+    checksum_storage: &'c dyn ChecksumStorage,
 }
 
-impl<'a, 'b> TypeView for TypeWithLoader<'a, 'b> {
+impl<'a, 'b, 'c> TypeView for TypeWithLoader<'a, 'b, 'c> {
     fn to_type_tag(&self) -> TypeTag {
-        self.loader.type_to_type_tag(self.ty).unwrap()
+        self.loader
+            .type_to_type_tag(self.ty, self.checksum_storage)
+            .unwrap()
     }
 }
 
@@ -72,6 +76,7 @@ impl Interpreter {
         ty_args: Vec<Type>,
         args: Vec<Value>,
         data_store: &mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         loader: &Loader,
@@ -82,7 +87,14 @@ impl Interpreter {
             paranoid_type_checks: loader.vm_config().paranoid_type_checks,
         }
         .execute_main(
-            loader, data_store, gas_meter, extensions, function, ty_args, args,
+            loader,
+            data_store,
+            checksum_store,
+            gas_meter,
+            extensions,
+            function,
+            ty_args,
+            args,
         )
     }
 
@@ -96,6 +108,7 @@ impl Interpreter {
         mut self,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         function: Arc<Function>,
@@ -116,13 +129,13 @@ impl Interpreter {
         }
 
         let mut current_frame = self
-            .make_new_frame(loader, function, ty_args, locals)
+            .make_new_frame(loader, checksum_store, function, ty_args, locals)
             .map_err(|err| self.set_location(err))?;
         loop {
-            let resolver = current_frame.resolver(loader);
+            let resolver = current_frame.resolver(loader, &checksum_store);
             let exit_code =
                 current_frame //self
-                    .execute_code(&resolver, &mut self, data_store, gas_meter)
+                    .execute_code(&resolver, &mut self, data_store, checksum_store, gas_meter)
                     .map_err(|err| self.maybe_core_dump(err, &current_frame))?;
             match exit_code {
                 ExitCode::Return => {
@@ -148,7 +161,7 @@ impl Interpreter {
                 }
                 ExitCode::Call(fh_idx) => {
                     let func = resolver
-                        .function_from_handle(fh_idx)
+                        .function_from_handle(fh_idx, checksum_store)
                         .map_err(|e| self.set_location(e))?;
 
                     if self.paranoid_type_checks {
@@ -178,6 +191,7 @@ impl Interpreter {
                         self.call_native(
                             &resolver,
                             data_store,
+                            checksum_store,
                             gas_meter,
                             extensions,
                             func,
@@ -187,7 +201,7 @@ impl Interpreter {
                         continue;
                     }
                     let frame = self
-                        .make_call_frame(loader, func, vec![])
+                        .make_call_frame(loader, checksum_store, func, vec![])
                         .map_err(|e| self.set_location(e))
                         .map_err(|err| self.maybe_core_dump(err, &current_frame))?;
                     self.call_stack.push(current_frame).map_err(|frame| {
@@ -204,7 +218,7 @@ impl Interpreter {
                         .instantiate_generic_function(idx, current_frame.ty_args())
                         .map_err(|e| set_err_info!(current_frame, e))?;
                     let func = resolver
-                        .function_from_instantiation(idx)
+                        .function_from_instantiation(idx, checksum_store)
                         .map_err(|e| self.set_location(e))?;
 
                     if self.paranoid_type_checks {
@@ -223,7 +237,11 @@ impl Interpreter {
                         .charge_call_generic(
                             module_id,
                             func.name(),
-                            ty_args.iter().map(|ty| TypeWithLoader { ty, loader }),
+                            ty_args.iter().map(|ty| TypeWithLoader {
+                                ty,
+                                loader,
+                                checksum_storage: checksum_store,
+                            }),
                             self.operand_stack
                                 .last_n(func.arg_count())
                                 .map_err(|e| set_err_info!(current_frame, e))?,
@@ -233,13 +251,19 @@ impl Interpreter {
 
                     if func.is_native() {
                         self.call_native(
-                            &resolver, data_store, gas_meter, extensions, func, ty_args,
+                            &resolver,
+                            data_store,
+                            checksum_store,
+                            gas_meter,
+                            extensions,
+                            func,
+                            ty_args,
                         )?;
                         current_frame.pc += 1; // advance past the Call instruction in the caller
                         continue;
                     }
                     let frame = self
-                        .make_call_frame(loader, func, ty_args)
+                        .make_call_frame(loader, checksum_store, func, ty_args)
                         .map_err(|e| self.set_location(e))
                         .map_err(|err| self.maybe_core_dump(err, &current_frame))?;
                     self.call_stack.push(current_frame).map_err(|frame| {
@@ -261,6 +285,7 @@ impl Interpreter {
     fn make_call_frame(
         &mut self,
         loader: &Loader,
+        checksum_store: &TransactionChecksumCache,
         func: Arc<Function>,
         ty_args: Vec<Type>,
     ) -> PartialVMResult<Frame> {
@@ -278,7 +303,7 @@ impl Interpreter {
 
             if self.paranoid_type_checks {
                 let ty = self.operand_stack.pop_ty()?;
-                let resolver = func.get_resolver(loader);
+                let resolver = func.get_resolver(loader, checksum_store);
                 if is_generic {
                     ty.check_eq(
                         &resolver.subst(&func.local_types()[arg_count - i - 1], &ty_args)?,
@@ -289,7 +314,7 @@ impl Interpreter {
                 }
             }
         }
-        self.make_new_frame(loader, func, ty_args, locals)
+        self.make_new_frame(loader, checksum_store, func, ty_args, locals)
     }
 
     /// Create a new `Frame` given a `Function` and the function `Locals`.
@@ -298,6 +323,7 @@ impl Interpreter {
     fn make_new_frame(
         &self,
         loader: &Loader,
+        checksum_store: &TransactionChecksumCache,
         function: Arc<Function>,
         ty_args: Vec<Type>,
         locals: Locals,
@@ -306,7 +332,7 @@ impl Interpreter {
             if ty_args.is_empty() {
                 function.local_types().to_vec()
             } else {
-                let resolver = function.get_resolver(loader);
+                let resolver = function.get_resolver(loader, checksum_store);
                 function
                     .local_types()
                     .iter()
@@ -330,6 +356,7 @@ impl Interpreter {
         &mut self,
         resolver: &Resolver,
         data_store: &mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         function: Arc<Function>,
@@ -339,6 +366,7 @@ impl Interpreter {
         self.call_native_impl(
             resolver,
             data_store,
+            checksum_store,
             gas_meter,
             extensions,
             function.clone(),
@@ -366,6 +394,7 @@ impl Interpreter {
         &mut self,
         resolver: &Resolver,
         data_store: &mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         function: Arc<Function>,
@@ -387,23 +416,25 @@ impl Interpreter {
             }
         }
 
-        let mut native_context = NativeContext::new(
-            self,
-            data_store,
-            resolver,
-            extensions,
-            gas_meter.balance_internal(),
-        );
-        let native_function = function.get_native()?;
-
         gas_meter.charge_native_function_before_execution(
             ty_args.iter().map(|ty| TypeWithLoader {
                 ty,
                 loader: resolver.loader(),
+                checksum_storage: checksum_store,
             }),
             args.iter(),
         )?;
 
+        let mut native_context = NativeContext::new(
+            self,
+            data_store,
+            checksum_store,
+            resolver,
+            extensions,
+            gas_meter.balance_internal(),
+        );
+
+        let native_function = function.get_native()?;
         let result = native_function(&mut native_context, ty_args.clone(), args)?;
 
         // Note(Gas): The order by which gas is charged / error gets returned MUST NOT be modified
@@ -531,25 +562,26 @@ impl Interpreter {
     fn load_resource<'c>(
         loader: &Loader,
         data_store: &'c mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<&'c mut GlobalValue> {
-        match data_store.load_resource(loader, addr, ty) {
-            Ok((gv, load_res)) => {
-                println!("DEBUG MESSAGE {:?}", &gv);
-                if let Some(bytes_loaded) = load_res {
-                    gas_meter.charge_load_resource(
-                        addr,
-                        TypeWithLoader { ty, loader },
-                        gv.view(),
-                        bytes_loaded,
-                    )?;
-                }
-                Ok(gv)
-            }
-            Err(e) => Err(e),
+        let (gv, load_res) = data_store.load_resource(loader, checksum_store, addr, ty)?;
+
+        if let Some(bytes_loaded) = load_res {
+            gas_meter.charge_load_resource(
+                addr,
+                TypeWithLoader {
+                    ty,
+                    loader,
+                    checksum_storage: checksum_store,
+                },
+                gv.view(),
+                bytes_loaded,
+            )?;
         }
+        Ok(gv)
     }
 
     /// BorrowGlobal (mutable and not) opcode.
@@ -559,15 +591,21 @@ impl Interpreter {
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<()> {
-        let res = Self::load_resource(loader, data_store, gas_meter, addr, ty)?.borrow_global();
+        let res = Self::load_resource(loader, data_store, checksum_store, gas_meter, addr, ty)?
+            .borrow_global();
         gas_meter.charge_borrow_global(
             is_mut,
             is_generic,
-            TypeWithLoader { ty, loader },
+            TypeWithLoader {
+                ty,
+                loader,
+                checksum_storage: checksum_store,
+            },
             res.is_ok(),
         )?;
         self.operand_stack.push(res.map_err(|err| {
@@ -582,13 +620,22 @@ impl Interpreter {
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<()> {
-        let gv = Self::load_resource(loader, data_store, gas_meter, addr, ty)?;
+        let gv = Self::load_resource(loader, data_store, checksum_store, gas_meter, addr, ty)?;
         let exists = gv.exists()?;
-        gas_meter.charge_exists(is_generic, TypeWithLoader { ty, loader }, exists)?;
+        gas_meter.charge_exists(
+            is_generic,
+            TypeWithLoader {
+                ty,
+                loader,
+                checksum_storage: checksum_store,
+            },
+            exists,
+        )?;
         self.operand_stack.push(Value::bool(exists))?;
         Ok(())
     }
@@ -599,27 +646,43 @@ impl Interpreter {
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<()> {
-        let resource = match Self::load_resource(loader, data_store, gas_meter, addr, ty)?
-            .move_from()
-        {
-            Ok(resource) => {
-                gas_meter.charge_move_from(
-                    is_generic,
-                    TypeWithLoader { ty, loader },
-                    Some(&resource),
-                )?;
-                resource
-            }
-            Err(err) => {
-                let val: Option<&Value> = None;
-                gas_meter.charge_move_from(is_generic, TypeWithLoader { ty, loader }, val)?;
-                return Err(err.with_message(format!("Failed to move resource from {:?}", addr)));
-            }
-        };
+        let resource =
+            match Self::load_resource(loader, data_store, checksum_store, gas_meter, addr, ty)?
+                .move_from()
+            {
+                Ok(resource) => {
+                    gas_meter.charge_move_from(
+                        is_generic,
+                        TypeWithLoader {
+                            ty,
+                            loader,
+                            checksum_storage: checksum_store,
+                        },
+                        Some(&resource),
+                    )?;
+                    resource
+                }
+                Err(err) => {
+                    let val: Option<&Value> = None;
+                    gas_meter.charge_move_from(
+                        is_generic,
+                        TypeWithLoader {
+                            ty,
+                            loader,
+                            checksum_storage: checksum_store,
+                        },
+                        val,
+                    )?;
+                    return Err(
+                        err.with_message(format!("Failed to move resource from {:?}", addr))
+                    );
+                }
+            };
         self.operand_stack.push(resource)?;
         Ok(())
     }
@@ -630,19 +693,24 @@ impl Interpreter {
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
         resource: Value,
     ) -> PartialVMResult<()> {
-        let gv = Self::load_resource(loader, data_store, gas_meter, addr, ty)?;
+        let gv = Self::load_resource(loader, data_store, checksum_store, gas_meter, addr, ty)?;
         // NOTE(Gas): To maintain backward compatibility, we need to charge gas after attempting
         //            the move_to operation.
         match gv.move_to(resource) {
             Ok(()) => {
                 gas_meter.charge_move_to(
                     is_generic,
-                    TypeWithLoader { ty, loader },
+                    TypeWithLoader {
+                        ty,
+                        loader,
+                        checksum_storage: checksum_store,
+                    },
                     gv.view().unwrap(),
                     true,
                 )?;
@@ -651,7 +719,11 @@ impl Interpreter {
             Err((err, resource)) => {
                 gas_meter.charge_move_to(
                     is_generic,
-                    TypeWithLoader { ty, loader },
+                    TypeWithLoader {
+                        ty,
+                        loader,
+                        checksum_storage: checksum_store,
+                    },
                     &resource,
                     false,
                 )?;
@@ -696,6 +768,7 @@ impl Interpreter {
         &self,
         buf: &mut B,
         loader: &Loader,
+        checksum_store: &TransactionChecksumCache,
         idx: usize,
         frame: &Frame,
     ) -> PartialVMResult<()> {
@@ -710,7 +783,7 @@ impl Interpreter {
         let ty_args = frame.ty_args();
         let mut ty_tags = vec![];
         for ty in ty_args {
-            ty_tags.push(loader.type_to_type_tag(ty)?);
+            ty_tags.push(loader.type_to_type_tag(ty, checksum_store)?);
         }
         if !ty_tags.is_empty() {
             debug_write!(buf, "<")?;
@@ -760,10 +833,11 @@ impl Interpreter {
         &self,
         buf: &mut B,
         loader: &Loader,
+        checksum_store: &TransactionChecksumCache,
     ) -> PartialVMResult<()> {
         debug_writeln!(buf, "Call Stack:")?;
         for (i, frame) in self.call_stack.0.iter().enumerate() {
-            self.debug_print_frame(buf, loader, i, frame)?;
+            self.debug_print_frame(buf, loader, checksum_store, i, frame)?;
         }
         debug_writeln!(buf, "Operand Stack:")?;
         for (idx, val) in self.operand_stack.value.iter().enumerate() {
@@ -997,18 +1071,23 @@ impl CallStack {
     }
 }
 
-fn check_depth_of_type(resolver: &Resolver, ty: &Type) -> PartialVMResult<()> {
+fn check_depth_of_type(
+    resolver: &Resolver,
+    checksum_store: &TransactionChecksumCache,
+    ty: &Type,
+) -> PartialVMResult<()> {
     // Start at 1 since we always call this right before we add a new node to the value's depth.
     let max_depth = match resolver.loader().vm_config().max_value_nest_depth {
         Some(max_depth) => max_depth,
         None => return Ok(()),
     };
-    check_depth_of_type_impl(resolver, ty, max_depth, 1)?;
+    check_depth_of_type_impl(resolver, checksum_store, ty, max_depth, 1)?;
     Ok(())
 }
 
 fn check_depth_of_type_impl(
     resolver: &Resolver,
+    checksum_store: &TransactionChecksumCache,
     ty: &Type,
     max_depth: u64,
     depth: u64,
@@ -1038,11 +1117,15 @@ fn check_depth_of_type_impl(
         // Even though this is recursive this is OK since the depth of this recursion is
         // bounded by the depth of the type arguments, which we have already checked.
         Type::Reference(ty) | Type::MutableReference(ty) => {
-            check_depth_of_type_impl(resolver, ty, max_depth, check_depth!(1))?
+            check_depth_of_type_impl(resolver, checksum_store, ty, max_depth, check_depth!(1))?
         }
-        Type::Vector(ty) => check_depth_of_type_impl(resolver, ty, max_depth, check_depth!(1))?,
+        Type::Vector(ty) => {
+            check_depth_of_type_impl(resolver, checksum_store, ty, max_depth, check_depth!(1))?
+        }
         Type::Struct { id, .. } => {
-            let formula = resolver.loader().calculate_depth_of_struct(id)?;
+            let formula = resolver
+                .loader()
+                .calculate_depth_of_struct(id, checksum_store)?;
             check_depth!(formula.solve(&[]))
         }
         // NB: substitution must be performed before calling this function
@@ -1052,10 +1135,18 @@ fn check_depth_of_type_impl(
                 .iter()
                 .map(|ty| {
                     // Ty args should be fully resolved and not need any type arguments
-                    check_depth_of_type_impl(resolver, ty, max_depth, check_depth!(0))
+                    check_depth_of_type_impl(
+                        resolver,
+                        checksum_store,
+                        ty,
+                        max_depth,
+                        check_depth!(0),
+                    )
                 })
                 .collect::<PartialVMResult<Vec<_>>>()?;
-            let formula = resolver.loader().calculate_depth_of_struct(id)?;
+            let formula = resolver
+                .loader()
+                .calculate_depth_of_struct(id, checksum_store)?;
             check_depth!(formula.solve(&ty_arg_depths))
         }
         Type::TyParam(_) => {
@@ -1107,9 +1198,10 @@ impl Frame {
         resolver: &Resolver,
         interpreter: &mut Interpreter,
         data_store: &mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
     ) -> VMResult<ExitCode> {
-        self.execute_code_impl(resolver, interpreter, data_store, gas_meter)
+        self.execute_code_impl(resolver, interpreter, data_store, checksum_store, gas_meter)
             .map_err(|e| {
                 let e = if cfg!(feature = "testing") || cfg!(feature = "stacktrace") {
                     e.with_exec_state(interpreter.get_internal_state())
@@ -1722,6 +1814,7 @@ impl Frame {
         resolver: &Resolver,
         interpreter: &mut Interpreter,
         data_store: &mut TransactionDataCache,
+        checksum_store: &TransactionChecksumCache,
         gas_meter: &mut impl GasMeter,
     ) -> PartialVMResult<ExitCode> {
         use SimpleInstruction as S;
@@ -1731,6 +1824,7 @@ impl Frame {
                 TypeWithLoader {
                     ty: $ty,
                     loader: resolver.loader(),
+                    checksum_storage: checksum_store,
                 }
             };
         }
@@ -1744,6 +1838,7 @@ impl Frame {
                     self.pc,
                     instruction,
                     resolver,
+                    checksum_store,
                     interpreter
                 );
 
@@ -1931,7 +2026,7 @@ impl Frame {
                     Bytecode::Pack(sd_idx) => {
                         let field_count = resolver.field_count(*sd_idx);
                         let struct_type = resolver.get_struct_type(*sd_idx)?;
-                        check_depth_of_type(resolver, &struct_type)?;
+                        check_depth_of_type(resolver, &checksum_store, &struct_type)?;
                         gas_meter.charge_pack(
                             false,
                             interpreter.operand_stack.last_n(field_count as usize)?,
@@ -1944,7 +2039,7 @@ impl Frame {
                     Bytecode::PackGeneric(si_idx) => {
                         let field_count = resolver.field_instantiation_count(*si_idx);
                         let ty = resolver.get_struct_type_generic(*si_idx, self.ty_args())?;
-                        check_depth_of_type(resolver, &ty)?;
+                        check_depth_of_type(resolver, &checksum_store, &ty)?;
                         gas_meter.charge_pack(
                             true,
                             interpreter.operand_stack.last_n(field_count as usize)?,
@@ -2139,6 +2234,7 @@ impl Frame {
                             false,
                             resolver.loader(),
                             data_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2154,6 +2250,7 @@ impl Frame {
                             true,
                             resolver.loader(),
                             data_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2166,6 +2263,7 @@ impl Frame {
                             false,
                             resolver.loader(),
                             data_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2178,6 +2276,7 @@ impl Frame {
                             true,
                             resolver.loader(),
                             data_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2190,6 +2289,7 @@ impl Frame {
                             false,
                             resolver.loader(),
                             data_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2202,6 +2302,7 @@ impl Frame {
                             true,
                             resolver.loader(),
                             data_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2221,6 +2322,7 @@ impl Frame {
                             false,
                             resolver.loader(),
                             data_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2240,6 +2342,7 @@ impl Frame {
                             true,
                             resolver.loader(),
                             data_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2261,7 +2364,7 @@ impl Frame {
                     }
                     Bytecode::VecPack(si, num) => {
                         let ty = resolver.instantiate_single_type(*si, self.ty_args())?;
-                        check_depth_of_type(resolver, &ty)?;
+                        check_depth_of_type(resolver, &checksum_store, &ty)?;
                         gas_meter.charge_vec_pack(
                             make_ty!(&ty),
                             interpreter.operand_stack.last_n(*num as usize)?,
@@ -2276,6 +2379,7 @@ impl Frame {
                         gas_meter.charge_vec_len(TypeWithLoader {
                             ty,
                             loader: resolver.loader(),
+                            checksum_storage: checksum_store,
                         })?;
                         let value = vec_ref.len(ty)?;
                         interpreter.operand_stack.push(value)?;
@@ -2367,8 +2471,12 @@ impl Frame {
         &self.ty_args
     }
 
-    fn resolver<'a>(&self, loader: &'a Loader) -> Resolver<'a> {
-        self.function.get_resolver(loader)
+    fn resolver<'a>(
+        &self,
+        loader: &'a Loader,
+        checksum_store: &TransactionChecksumCache,
+    ) -> Resolver<'a> {
+        self.function.get_resolver(loader, checksum_store)
     }
 
     fn location(&self) -> Location {

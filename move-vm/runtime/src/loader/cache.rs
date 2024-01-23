@@ -10,7 +10,7 @@ use move_core_types::{
 };
 use move_vm_types::loaded_data::runtime_types::{DepthFormula, StructIdentifier, StructType, Type};
 
-use super::{function::Function, module::Module, script::Script, Checksum};
+use super::{function::Function, module::Module, script::Script, Checksum, ChecksumStorage};
 
 pub(crate) struct ModuleCache {
     modules: HashMap<Checksum, Arc<Module>>,
@@ -45,8 +45,10 @@ impl ModuleCache {
     pub(crate) fn get_struct_type_by_identifier(
         &self,
         id: &StructIdentifier,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<Arc<StructType>> {
-        self.get(&id.checksum)
+        let checksum = checksum_storage.load_checksum(&id.module_id)?;
+        self.get(&checksum)
             .and_then(|module| {
                 let idx = module.struct_map.get(&id.name)?;
                 Some(module.structs.get(*idx)?.definition_struct_type.clone())
@@ -91,8 +93,10 @@ impl TypeCache {
         &mut self,
         id: &StructIdentifier,
         ty_args: &[Type],
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<&mut StructInfoCache> {
-        match self.types.get_mut(&id.checksum) {
+        let checksum: [u8; 32] = checksum_storage.load_checksum(&id.module_id)?;
+        match self.types.get_mut(&checksum) {
             Some(item) => Ok(item
                 .structs
                 .entry(id.name.clone())
@@ -108,8 +112,10 @@ impl TypeCache {
         &mut self,
         id: &StructIdentifier,
         depth_formula: DepthFormula,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<Option<DepthFormula>> {
-        match self.types.get_mut(&id.checksum) {
+        let checksum: [u8; 32] = checksum_storage.load_checksum(&id.module_id)?;
+        match self.types.get_mut(&checksum) {
             Some(item) => Ok(item.depth_formula.insert(id.name.clone(), depth_formula)),
             None => Err(PartialVMError::new(StatusCode::LINKER_ERROR)
                 .with_message(format!("Cannot find {:x?} in cache", id.module_id))),

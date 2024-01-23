@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    checksum_cache::TransactionChecksumCache,
     interpreter::Interpreter,
     loader::{Function, Loader},
 };
@@ -104,7 +105,8 @@ impl DebugContext {
         locals: &Locals,
         pc: u16,
         instr: &Bytecode,
-        resolver: &Loader,
+        loader: &Loader,
+        checksum_store: &TransactionChecksumCache,
         interp: &Interpreter,
     ) {
         let instr_string = format!("{:?}", instr);
@@ -144,17 +146,17 @@ impl DebugContext {
                             DebugCommand::Step => {
                                 self.should_take_input = true;
                                 break;
-                            },
+                            }
                             DebugCommand::Continue => {
                                 self.should_take_input = false;
                                 break;
-                            },
+                            }
                             DebugCommand::Breakpoint(breakpoint) => {
                                 self.breakpoints.insert(breakpoint.to_string());
-                            },
+                            }
                             DebugCommand::DeleteBreakpoint(breakpoint) => {
                                 self.breakpoints.remove(&breakpoint);
-                            },
+                            }
                             DebugCommand::PrintBreakpoints => self
                                 .breakpoints
                                 .iter()
@@ -162,7 +164,9 @@ impl DebugContext {
                                 .for_each(|(i, bp)| println!("[{}] {}", i, bp)),
                             DebugCommand::PrintStack => {
                                 let mut s = String::new();
-                                interp.debug_print_stack_trace(&mut s, resolver).unwrap();
+                                interp
+                                    .debug_print_stack_trace(&mut s, loader, checksum_store)
+                                    .unwrap();
                                 println!("{}", s);
                                 println!("Current frame: {}\n", function_string);
                                 let code = function_desc.code();
@@ -182,13 +186,13 @@ impl DebugContext {
                                 } else {
                                     println!("            (none)");
                                 }
-                            },
+                            }
                         },
                     },
                     Err(err) => {
                         println!("Error reading input: {}", err);
                         break;
-                    },
+                    }
                 }
             }
         }

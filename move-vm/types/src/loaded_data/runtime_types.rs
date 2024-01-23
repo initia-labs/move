@@ -165,7 +165,6 @@ pub type Checksum = [u8; 32];
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StructIdentifier {
     pub module_id: ModuleId,
-    pub checksum: Checksum,
     pub name: Identifier,
 }
 

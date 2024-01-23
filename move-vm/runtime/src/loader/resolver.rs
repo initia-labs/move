@@ -14,7 +14,7 @@ use move_vm_types::loaded_data::runtime_types::{AbilityInfo, StructType, Type};
 
 use super::{
     function::Function, loader::MAX_TYPE_INSTANTIATION_NODES, module::Module, script::Script,
-    Loader,
+    ChecksumStorage, Loader,
 };
 
 // A simple wrapper for a `Module` or a `Script` in the `Resolver`
@@ -60,23 +60,25 @@ impl<'a> Resolver<'a> {
     pub(crate) fn function_from_handle(
         &self,
         idx: FunctionHandleIndex,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<Arc<Function>> {
         let idx = match &self.binary {
             BinaryType::Module(module) => module.function_at(idx.0),
             BinaryType::Script(script) => script.function_at(idx.0),
         };
-        self.loader.function_at(idx)
+        self.loader.function_at(idx, checksum_storage)
     }
 
     pub(crate) fn function_from_instantiation(
         &self,
         idx: FunctionInstantiationIndex,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<Arc<Function>> {
         let func_inst = match &self.binary {
             BinaryType::Module(module) => module.function_instantiation_at(idx.0),
             BinaryType::Script(script) => script.function_instantiation_at(idx.0),
         };
-        self.loader.function_at(&func_inst.handle)
+        self.loader.function_at(&func_inst.handle, checksum_storage)
     }
 
     pub(crate) fn instantiate_generic_function(
@@ -326,22 +328,30 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    pub(crate) fn type_to_type_layout(&self, ty: &Type) -> PartialVMResult<MoveTypeLayout> {
-        self.loader.type_to_type_layout(ty)
+    pub(crate) fn type_to_type_layout(
+        &self,
+        ty: &Type,
+        checksum_storage: &dyn ChecksumStorage,
+    ) -> PartialVMResult<MoveTypeLayout> {
+        self.loader.type_to_type_layout(ty, checksum_storage)
     }
 
     pub(crate) fn type_to_type_layout_with_identifier_mappings(
         &self,
         ty: &Type,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<(MoveTypeLayout, bool)> {
-        self.loader.type_to_type_layout_with_identifier_mappings(ty)
+        self.loader
+            .type_to_type_layout_with_identifier_mappings(ty, checksum_storage)
     }
 
     pub(crate) fn type_to_fully_annotated_layout(
         &self,
         ty: &Type,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<MoveTypeLayout> {
-        self.loader.type_to_fully_annotated_layout(ty)
+        self.loader
+            .type_to_fully_annotated_layout(ty, checksum_storage)
     }
 
     // get the loader

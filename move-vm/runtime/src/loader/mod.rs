@@ -10,7 +10,7 @@ mod type_loader;
 
 pub(crate) use function::Function;
 pub(crate) use resolver::Resolver;
-pub(crate) use store::{ModuleStorage, ModuleStorageForVerify};
+pub(crate) use store::{ChecksumStorage, ChecksumStorageForVerify, ModuleStorage};
 
 pub use function::LoadedFunction;
 pub use loader::Loader;

@@ -37,7 +37,7 @@ use super::{
     module::Module,
     script::Script,
     store::ModuleStorage,
-    Checksum,
+    Checksum, ChecksumStorage,
 };
 
 // A Loader is responsible to load scripts and modules and holds the cache of all loaded
@@ -95,6 +95,7 @@ impl Loader {
         script_blob: &[u8],
         ty_args: &[TypeTag],
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<(Arc<Function>, LoadedFunctionInstantiation)> {
         // retrieve or load the script
         let mut sha3_256 = Sha3_256::new();
@@ -109,12 +110,16 @@ impl Loader {
                 cached
             }
             None => {
-                let ver_script = self.deserialize_and_verify_script(script_blob, module_storage)?;
+                let ver_script = self.deserialize_and_verify_script(
+                    script_blob,
+                    module_storage,
+                    checksum_storage,
+                )?;
                 let script = Script::new(
                     ver_script,
                     &checksum,
                     &self.module_cache.read(),
-                    module_storage,
+                    checksum_storage,
                 )
                 .map_err(|e| e.finish(Location::Script))?;
 
@@ -136,7 +141,7 @@ impl Loader {
         // verify type arguments
         let mut type_arguments = vec![];
         for ty in ty_args {
-            type_arguments.push(self.load_type(ty, module_storage)?);
+            type_arguments.push(self.load_type(ty, module_storage, checksum_storage)?);
         }
 
         if self.vm_config.type_size_limit
@@ -169,6 +174,7 @@ impl Loader {
         &self,
         script: &[u8],
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<CompiledScript> {
         let script = match CompiledScript::deserialize_with_config(
             script,
@@ -189,7 +195,7 @@ impl Loader {
                 let loaded_deps = script
                     .immediate_dependencies()
                     .into_iter()
-                    .map(|module_id| self.load_module(&module_id, module_storage))
+                    .map(|module_id| self.load_module(&module_id, module_storage, checksum_storage))
                     .collect::<VMResult<_>>()?;
                 self.verify_script_dependencies(&script, loaded_deps)?;
                 Ok(script)
@@ -228,8 +234,9 @@ impl Loader {
         module_id: &ModuleId,
         function_name: &IdentStr,
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<(Arc<Module>, Arc<Function>, Vec<Type>, Vec<Type>)> {
-        let module = self.load_module(module_id, module_storage)?;
+        let module = self.load_module(module_id, module_storage, checksum_storage)?;
         let func = module
             .resolve_function_by_name(function_name)
             .map_err(|e| e.finish(Location::Undefined))?;
@@ -332,9 +339,14 @@ impl Loader {
         function_name: &IdentStr,
         expected_return_type: &Type,
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<(LoadedFunction, LoadedFunctionInstantiation)> {
-        let (module, func, parameters, return_vec) =
-            self.load_function_without_type_args(module_id, function_name, module_storage)?;
+        let (module, func, parameters, return_vec) = self.load_function_without_type_args(
+            module_id,
+            function_name,
+            module_storage,
+            checksum_storage,
+        )?;
 
         if return_vec.len() != 1 {
             // For functions that are marked constructor this should not happen.
@@ -394,13 +406,18 @@ impl Loader {
         function_name: &IdentStr,
         ty_args: &[TypeTag],
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<(Arc<Module>, Arc<Function>, LoadedFunctionInstantiation)> {
-        let (module, func, parameters, return_) =
-            self.load_function_without_type_args(module_id, function_name, module_storage)?;
+        let (module, func, parameters, return_) = self.load_function_without_type_args(
+            module_id,
+            function_name,
+            module_storage,
+            checksum_storage,
+        )?;
 
         let type_arguments = ty_args
             .iter()
-            .map(|ty| self.load_type(ty, module_storage))
+            .map(|ty| self.load_type(ty, module_storage, checksum_storage))
             .collect::<VMResult<Vec<_>>>()
             .map_err(|mut err| {
                 // User provided type arguement failed to load. Set extra sub status to distinguish from internal type loading error.
@@ -430,6 +447,7 @@ impl Loader {
         &self,
         modules: &[CompiledModule],
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<()> {
         fail::fail_point!("verifier-failpoint-1", |_| { Ok(()) });
 
@@ -444,6 +462,7 @@ impl Loader {
                 &bundle_verified,
                 &bundle_unverified,
                 module_storage,
+                checksum_storage,
             )?;
             bundle_verified.insert(module_id.clone(), module.clone());
         }
@@ -467,6 +486,7 @@ impl Loader {
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<()> {
         // Performs all verification steps to load the module without loading it, i.e., the new
         // module will NOT show up in `module_cache`. In the module republishing case, it means
@@ -487,6 +507,7 @@ impl Loader {
             module,
             bundle_verified,
             module_storage,
+            checksum_storage,
             &mut visited,
             &mut friends_discovered,
             /* allow_dependency_loading_failure */ true,
@@ -501,13 +522,14 @@ impl Loader {
             bundle_verified,
             bundle_unverified,
             module_storage,
+            checksum_storage,
             /* allow_friend_loading_failure */ true,
             /* dependencies_depth */ 0,
         )?;
 
         // make sure there is no cyclic dependency
         self.verify_module_cyclic_relations(
-            module_storage,
+            checksum_storage,
             module,
             bundle_verified,
             bundle_unverified,
@@ -516,7 +538,7 @@ impl Loader {
 
     fn verify_module_cyclic_relations(
         &self,
-        module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
         module: &CompiledModule,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
@@ -528,7 +550,7 @@ impl Loader {
                 match bundle_verified.get(module_id) {
                     Some(m) => Some(m.immediate_dependencies()),
                     None => {
-                        let checksum = module_storage.load_checksum(module_id)?;
+                        let checksum = checksum_storage.load_checksum(module_id)?;
                         locked_module_cache
                             .get(&checksum)
                             .map(|m| m.compiled_module().immediate_dependencies())
@@ -548,7 +570,7 @@ impl Loader {
                     match bundle_verified.get(module_id) {
                         Some(m) => Some(m.immediate_friends()),
                         None => {
-                            let checksum = module_storage.load_checksum(module_id)?;
+                            let checksum = checksum_storage.load_checksum(module_id)?;
                             locked_module_cache
                                 .get(&checksum)
                                 .map(|m| m.compiled_module().immediate_friends())
@@ -586,6 +608,7 @@ impl Loader {
         &self,
         type_tag: &TypeTag,
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<Type> {
         Ok(match type_tag {
             TypeTag::Bool => Type::Bool,
@@ -597,12 +620,14 @@ impl Loader {
             TypeTag::U256 => Type::U256,
             TypeTag::Address => Type::Address,
             TypeTag::Signer => Type::Signer,
-            TypeTag::Vector(tt) => {
-                Type::Vector(triomphe::Arc::new(self.load_type(tt, module_storage)?))
-            }
+            TypeTag::Vector(tt) => Type::Vector(triomphe::Arc::new(self.load_type(
+                tt,
+                module_storage,
+                checksum_storage,
+            )?)),
             TypeTag::Struct(struct_tag) => {
                 let module_id = ModuleId::new(struct_tag.address, struct_tag.module.clone());
-                let module = self.load_module(&module_id, module_storage)?;
+                let module = self.load_module(&module_id, module_storage, checksum_storage)?;
                 let struct_type = module
                     .get_struct_type_by_identifier(&struct_tag.name)
                     .map_err(|e| e.finish(Location::Undefined))?;
@@ -614,7 +639,11 @@ impl Loader {
                 } else {
                     let mut type_params = vec![];
                     for ty_param in &struct_tag.type_params {
-                        type_params.push(self.load_type(ty_param, module_storage)?);
+                        type_params.push(self.load_type(
+                            ty_param,
+                            module_storage,
+                            checksum_storage,
+                        )?);
                     }
                     self.verify_ty_args(struct_type.type_param_constraints(), &type_params)
                         .map_err(|e| e.finish(Location::Undefined))?;
@@ -637,8 +666,15 @@ impl Loader {
         &self,
         id: &ModuleId,
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<Arc<Module>> {
-        self.load_module_internal(id, &BTreeMap::new(), &BTreeSet::new(), module_storage)
+        self.load_module_internal(
+            id,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            module_storage,
+            checksum_storage,
+        )
     }
 
     // The interface to cleanup the unused modules from the cache.
@@ -685,9 +721,10 @@ impl Loader {
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<Arc<Module>> {
         // if the module is already in the code cache, load the cached version
-        let checksum = module_storage
+        let checksum = checksum_storage
             .load_checksum(id)
             .map_err(|e| e.finish(Location::Undefined))?;
 
@@ -707,13 +744,14 @@ impl Loader {
             bundle_verified,
             bundle_unverified,
             module_storage,
+            checksum_storage,
             /* allow_module_loading_failure */ true,
             /* dependencies_depth */ 0,
         )?;
 
         // verify that the transitive closure does not have cycles
         self.verify_module_cyclic_relations(
-            module_storage,
+            checksum_storage,
             module_ref.compiled_module(),
             bundle_verified,
             bundle_unverified,
@@ -778,6 +816,7 @@ impl Loader {
         id: &ModuleId,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
         visited: &mut BTreeSet<ModuleId>,
         friends_discovered: &mut BTreeSet<ModuleId>,
         allow_module_loading_failure: bool,
@@ -801,6 +840,7 @@ impl Loader {
             &module,
             bundle_verified,
             module_storage,
+            checksum_storage,
             visited,
             friends_discovered,
             /* allow_dependency_loading_failure */ false,
@@ -809,8 +849,13 @@ impl Loader {
 
         // if linking goes well, insert the module to the code cache
         let mut locked_module_cache = self.module_cache.write();
-        let module = Module::new(&self.natives, module, &locked_module_cache, module_storage)
-            .map_err(|e| e.finish(Location::Undefined))?;
+        let module = Module::new(
+            &self.natives,
+            module,
+            &locked_module_cache,
+            checksum_storage,
+        )
+        .map_err(|e| e.finish(Location::Undefined))?;
 
         let module_id = module.id.clone();
         let checksum = module.checksum;
@@ -832,6 +877,7 @@ impl Loader {
         module: &CompiledModule,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
         visited: &mut BTreeSet<ModuleId>,
         friends_discovered: &mut BTreeSet<ModuleId>,
         allow_dependency_loading_failure: bool,
@@ -855,7 +901,7 @@ impl Loader {
             if let Some(cached) = bundle_verified.get(&module_id) {
                 bundle_deps.push(cached);
             } else {
-                let checksum = module_storage
+                let checksum = checksum_storage
                     .load_checksum(&module_id)
                     .map_err(|e| e.finish(Location::Undefined))?;
 
@@ -867,6 +913,7 @@ impl Loader {
                             &module_id,
                             bundle_verified,
                             module_storage,
+                            checksum_storage,
                             visited,
                             friends_discovered,
                             allow_dependency_loading_failure,
@@ -905,6 +952,7 @@ impl Loader {
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
         allow_module_loading_failure: bool,
         dependencies_depth: usize,
     ) -> VMResult<Arc<Module>> {
@@ -915,6 +963,7 @@ impl Loader {
             id,
             bundle_verified,
             module_storage,
+            checksum_storage,
             &mut visited,
             &mut friends_discovered,
             allow_module_loading_failure,
@@ -929,6 +978,7 @@ impl Loader {
             bundle_verified,
             bundle_unverified,
             module_storage,
+            checksum_storage,
             /* allow_friend_loading_failure */ false,
             dependencies_depth,
         )?;
@@ -942,6 +992,7 @@ impl Loader {
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
         module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
         allow_friend_loading_failure: bool,
         dependencies_depth: usize,
     ) -> VMResult<()> {
@@ -971,7 +1022,7 @@ impl Loader {
         let new_imm_friends: Vec<_> = friends_discovered
             .into_iter()
             .map(|mid| {
-                module_storage
+                checksum_storage
                     .load_checksum(&mid)
                     .and_then(|checksum| Ok((mid.clone(), checksum)))
                     .map_err(|e| e.finish(Location::Undefined))
@@ -992,6 +1043,7 @@ impl Loader {
                 bundle_verified,
                 bundle_unverified,
                 module_storage,
+                checksum_storage,
                 allow_friend_loading_failure,
                 dependencies_depth + 1,
             )?;
@@ -1068,26 +1120,35 @@ impl Loader {
     // Internal helpers
     //
 
-    pub(crate) fn function_at(&self, handle: &FunctionHandle) -> PartialVMResult<Arc<Function>> {
+    pub(crate) fn function_at(
+        &self,
+        handle: &FunctionHandle,
+        checksum_storage: &dyn ChecksumStorage,
+    ) -> PartialVMResult<Arc<Function>> {
         match handle {
             FunctionHandle::Local(func) => Ok(func.clone()),
-            FunctionHandle::Remote { module, name } => {
-                self.get_module(module)
+            FunctionHandle::Remote { module_id, name } => {
+                self.get_module(module_id, checksum_storage)?
                     .and_then(|module| {
                         let idx = module.function_map.get(name)?;
                         module.function_defs.get(*idx).cloned()
                     })
                     .ok_or_else(|| {
                         PartialVMError::new(StatusCode::TYPE_RESOLUTION_FAILURE).with_message(
-                            format!("Failed to resolve function: {:?}::{:?}", module, name),
+                            format!("Failed to resolve function: {:?}::{:?}", module_id, name),
                         )
                     })
             }
         }
     }
 
-    pub(crate) fn get_module(&self, checksum: &Checksum) -> Option<Arc<Module>> {
-        self.module_cache.read().get(checksum)
+    pub(crate) fn get_module(
+        &self,
+        id: &ModuleId,
+        checksum_storage: &dyn ChecksumStorage,
+    ) -> PartialVMResult<Option<Arc<Module>>> {
+        let checksum = checksum_storage.load_checksum(id)?;
+        Ok(self.module_cache.read().get(&checksum))
     }
 
     pub(crate) fn get_script(&self, checksum: &Checksum) -> Arc<Script> {
@@ -1100,15 +1161,13 @@ impl Loader {
     pub(crate) fn get_struct_type_by_identifier(
         &self,
         id: &StructIdentifier,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<Arc<StructType>> {
-        let module = self
-            .module_cache
-            .read()
-            .get(&id.checksum)
-            .ok_or_else(|| {
-                PartialVMError::new(StatusCode::LINKER_ERROR)
-                    .with_message(format!("Cannot find {:?} in cache", id.checksum))
-            })?;
+        let checksum = checksum_storage.load_checksum(&id.module_id)?;
+        let module = self.module_cache.read().get(&checksum).ok_or_else(|| {
+            PartialVMError::new(StatusCode::LINKER_ERROR)
+                .with_message(format!("Cannot find {:?} in cache", checksum))
+        })?;
 
         module.get_struct_type_by_identifier(&id.name)
     }
@@ -1150,11 +1209,13 @@ impl Loader {
         id: &StructIdentifier,
         ty_args: &[Type],
         gas_context: &mut PseudoGasContext,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<StructTag> {
+        let checksum = checksum_storage.load_checksum(&id.module_id)?;
         let locked_type_cache = self.type_cache.read();
-        let types = locked_type_cache.get_types(&id.checksum).ok_or_else(|| {
+        let types = locked_type_cache.get_types(&checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
-                .with_message(format!("Cannot find {:?} in cache", id.checksum))
+                .with_message(format!("Cannot find {:?} in cache", checksum))
         })?;
 
         let module_id = types.module_id.clone();
@@ -1174,7 +1235,7 @@ impl Loader {
 
         let ty_arg_tags = ty_args
             .iter()
-            .map(|ty| self.type_to_type_tag_impl(ty, gas_context))
+            .map(|ty| self.type_to_type_tag_impl(ty, gas_context, checksum_storage))
             .collect::<PartialVMResult<Vec<_>>>()?;
         let struct_tag = StructTag {
             address: *module_id.address(),
@@ -1187,8 +1248,10 @@ impl Loader {
             (struct_tag.address.len() + struct_tag.module.len() + struct_tag.name.len()) as u64;
         gas_context.charge(size * gas_context.cost_per_byte)?;
 
-        self.type_cache.write().insert_type(id, ty_args)?.struct_tag =
-            Some((struct_tag.clone(), gas_context.cost - cur_cost));
+        self.type_cache
+            .write()
+            .insert_type(id, ty_args, checksum_storage)?
+            .struct_tag = Some((struct_tag.clone(), gas_context.cost - cur_cost));
 
         Ok(struct_tag)
     }
@@ -1197,6 +1260,7 @@ impl Loader {
         &self,
         ty: &Type,
         gas_context: &mut PseudoGasContext,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<TypeTag> {
         gas_context.charge(gas_context.cost_base)?;
         Ok(match ty {
@@ -1209,14 +1273,17 @@ impl Loader {
             Type::U256 => TypeTag::U256,
             Type::Address => TypeTag::Address,
             Type::Signer => TypeTag::Signer,
-            Type::Vector(ty) => TypeTag::Vector(Box::new(self.type_to_type_tag(ty)?)),
+            Type::Vector(ty) => {
+                TypeTag::Vector(Box::new(self.type_to_type_tag(ty, checksum_storage)?))
+            }
             Type::Struct { id, .. } => TypeTag::Struct(Box::new(self.struct_name_to_type_tag(
                 id,
                 &[],
                 gas_context,
+                checksum_storage,
             )?)),
             Type::StructInstantiation { id, ty_args, .. } => TypeTag::Struct(Box::new(
-                self.struct_name_to_type_tag(id, ty_args, gas_context)?,
+                self.struct_name_to_type_tag(id, ty_args, gas_context, checksum_storage)?,
             )),
             Type::Reference(_) | Type::MutableReference(_) | Type::TyParam(_) => {
                 return Err(
@@ -1258,11 +1325,13 @@ impl Loader {
         ty_args: &[Type],
         count: &mut u64,
         depth: u64,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<(MoveStructLayout, bool)> {
+        let checksum = checksum_storage.load_checksum(&id.module_id)?;
         let locked_type_cache = self.type_cache.read();
-        let types = locked_type_cache.get_types(&id.checksum).ok_or_else(|| {
+        let types = locked_type_cache.get_types(&checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
-                .with_message(format!("Cannot find {:?} in cache", id.checksum))
+                .with_message(format!("Cannot find {:?} in cache", checksum))
         })?;
 
         if let Some(struct_map) = types.structs.get(&id.name) {
@@ -1281,7 +1350,7 @@ impl Loader {
         drop(locked_type_cache);
 
         let count_before = *count;
-        let struct_type = self.get_struct_type_by_identifier(id)?;
+        let struct_type = self.get_struct_type_by_identifier(id, checksum_storage)?;
 
         // Some types can have fields which are lifted at serialization or deserialization
         // times. Right now these are Aggregator and AggregatorSnapshot.
@@ -1295,7 +1364,7 @@ impl Loader {
         let (mut field_layouts, field_has_identifier_mappings): (Vec<MoveTypeLayout>, Vec<bool>) =
             field_tys
                 .iter()
-                .map(|ty| self.type_to_type_layout_impl(ty, count, depth + 1))
+                .map(|ty| self.type_to_type_layout_impl(ty, count, depth + 1, checksum_storage))
                 .collect::<PartialVMResult<Vec<_>>>()?
                 .into_iter()
                 .unzip();
@@ -1317,7 +1386,7 @@ impl Loader {
         let struct_layout = MoveStructLayout::new(field_layouts);
 
         let mut locked_type_cache = self.type_cache.write();
-        let info = locked_type_cache.insert_type(id, ty_args)?;
+        let info = locked_type_cache.insert_type(id, ty_args, checksum_storage)?;
         info.struct_layout_info = Some(StructLayoutInfoCacheItem {
             struct_layout: struct_layout.clone(),
             node_count: field_node_count,
@@ -1358,6 +1427,7 @@ impl Loader {
         ty: &Type,
         count: &mut u64,
         depth: u64,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<(MoveTypeLayout, bool)> {
         if *count > MAX_TYPE_TO_LAYOUT_NODES {
             return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
@@ -1405,7 +1475,7 @@ impl Loader {
             Type::Vector(ty) => {
                 *count += 1;
                 let (layout, has_identifier_mappings) =
-                    self.type_to_type_layout_impl(ty, count, depth + 1)?;
+                    self.type_to_type_layout_impl(ty, count, depth + 1, checksum_storage)?;
                 (
                     MoveTypeLayout::Vector(Box::new(layout)),
                     has_identifier_mappings,
@@ -1415,14 +1485,14 @@ impl Loader {
                 *count += 1;
                 // Note depth is increased inside struct_name_to_type_layout instead.
                 let (layout, has_identifier_mappings) =
-                    self.struct_name_to_type_layout(id, &[], count, depth)?;
+                    self.struct_name_to_type_layout(id, &[], count, depth, checksum_storage)?;
                 (MoveTypeLayout::Struct(layout), has_identifier_mappings)
             }
             Type::StructInstantiation { id, ty_args, .. } => {
                 *count += 1;
                 // Note depth is incread inside struct_name_to_type_layout instead.
                 let (layout, has_identifier_mappings) =
-                    self.struct_name_to_type_layout(id, ty_args, count, depth)?;
+                    self.struct_name_to_type_layout(id, ty_args, count, depth, checksum_storage)?;
                 (MoveTypeLayout::Struct(layout), has_identifier_mappings)
             }
             Type::Reference(_) | Type::MutableReference(_) | Type::TyParam(_) => {
@@ -1440,11 +1510,13 @@ impl Loader {
         ty_args: &[Type],
         count: &mut u64,
         depth: u64,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<MoveStructLayout> {
+        let checksum = checksum_storage.load_checksum(&id.module_id)?;
         let locked_type_cache = self.type_cache.read();
-        let types = locked_type_cache.get_types(&id.checksum).ok_or_else(|| {
+        let types = locked_type_cache.get_types(&checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
-                .with_message(format!("Cannot find {:?} in cache", id.checksum))
+                .with_message(format!("Cannot find {:?} in cache", checksum))
         })?;
 
         if let Some(struct_map) = types.structs.get(&id.name) {
@@ -1461,7 +1533,7 @@ impl Loader {
         // explicitly drop
         drop(locked_type_cache);
 
-        let struct_type = self.get_struct_type_by_identifier(&id)?;
+        let struct_type = self.get_struct_type_by_identifier(&id, checksum_storage)?;
         if struct_type.fields.len() != struct_type.field_names.len() {
             return Err(
                 PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR).with_message(
@@ -1479,14 +1551,20 @@ impl Loader {
             cost_per_byte: self.vm_config.type_byte_cost,
         };
 
-        let struct_tag = self.struct_name_to_type_tag(id, ty_args, &mut gas_context)?;
+        let struct_tag =
+            self.struct_name_to_type_tag(id, ty_args, &mut gas_context, checksum_storage)?;
         let field_layouts = struct_type
             .field_names
             .iter()
             .zip(&struct_type.fields)
             .map(|(n, ty)| {
                 let ty = self.subst(ty, ty_args)?;
-                let l = self.type_to_fully_annotated_layout_impl(&ty, count, depth + 1)?;
+                let l = self.type_to_fully_annotated_layout_impl(
+                    &ty,
+                    count,
+                    depth + 1,
+                    checksum_storage,
+                )?;
                 Ok(MoveFieldLayout::new(n.clone(), l))
             })
             .collect::<PartialVMResult<Vec<_>>>()?;
@@ -1494,7 +1572,7 @@ impl Loader {
         let field_node_count = *count - count_before;
 
         let mut locked_type_cache = self.type_cache.write();
-        let info = locked_type_cache.insert_type(id, ty_args)?;
+        let info = locked_type_cache.insert_type(id, ty_args, checksum_storage)?;
         info.annotated_struct_layout = Some(struct_layout.clone());
         info.annotated_node_count = Some(field_node_count);
 
@@ -1506,6 +1584,7 @@ impl Loader {
         ty: &Type,
         count: &mut u64,
         depth: u64,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<MoveTypeLayout> {
         if *count > MAX_TYPE_TO_LAYOUT_NODES {
             return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
@@ -1524,14 +1603,26 @@ impl Loader {
             Type::Address => MoveTypeLayout::Address,
             Type::Signer => MoveTypeLayout::Signer,
             Type::Vector(ty) => MoveTypeLayout::Vector(Box::new(
-                self.type_to_fully_annotated_layout_impl(ty, count, depth + 1)?,
+                self.type_to_fully_annotated_layout_impl(ty, count, depth + 1, checksum_storage)?,
             )),
-            Type::Struct { id, .. } => MoveTypeLayout::Struct(
-                self.struct_name_to_fully_annotated_layout(id, &[], count, depth)?,
-            ),
-            Type::StructInstantiation { id, ty_args, .. } => MoveTypeLayout::Struct(
-                self.struct_name_to_fully_annotated_layout(id, ty_args, count, depth)?,
-            ),
+            Type::Struct { id, .. } => {
+                MoveTypeLayout::Struct(self.struct_name_to_fully_annotated_layout(
+                    id,
+                    &[],
+                    count,
+                    depth,
+                    checksum_storage,
+                )?)
+            }
+            Type::StructInstantiation { id, ty_args, .. } => {
+                MoveTypeLayout::Struct(self.struct_name_to_fully_annotated_layout(
+                    id,
+                    ty_args,
+                    count,
+                    depth,
+                    checksum_storage,
+                )?)
+            }
             Type::Reference(_) | Type::MutableReference(_) | Type::TyParam(_) => {
                 return Err(
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
@@ -1544,11 +1635,13 @@ impl Loader {
     pub(crate) fn calculate_depth_of_struct(
         &self,
         id: &StructIdentifier,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<DepthFormula> {
+        let checksum = checksum_storage.load_checksum(&id.module_id)?;
         let locked_type_cache = self.type_cache.read();
-        let types = locked_type_cache.get_types(&id.checksum).ok_or_else(|| {
+        let types = locked_type_cache.get_types(&checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
-                .with_message(format!("Cannot find {:?} in cache", id.checksum))
+                .with_message(format!("Cannot find {:?} in cache", checksum))
         })?;
         if let Some(depth_formula) = types.depth_formula.get(&id.name) {
             return Ok(depth_formula.clone());
@@ -1557,18 +1650,18 @@ impl Loader {
         // explicitly drop
         drop(locked_type_cache);
 
-        let struct_type = self.get_struct_type_by_identifier(id)?;
+        let struct_type = self.get_struct_type_by_identifier(id, checksum_storage)?;
 
         let formulas = struct_type
             .fields
             .iter()
-            .map(|field_type| self.calculate_depth_of_type(field_type))
+            .map(|field_type| self.calculate_depth_of_type(field_type, checksum_storage))
             .collect::<PartialVMResult<Vec<_>>>()?;
         let formula = DepthFormula::normalize(formulas);
-        let prev = self
-            .type_cache
-            .write()
-            .insert_depth_formula(id, formula.clone())?;
+        let prev =
+            self.type_cache
+                .write()
+                .insert_depth_formula(id, formula.clone(), checksum_storage)?;
 
         if prev.is_some() {
             return Err(
@@ -1579,7 +1672,11 @@ impl Loader {
         Ok(formula)
     }
 
-    fn calculate_depth_of_type(&self, ty: &Type) -> PartialVMResult<DepthFormula> {
+    fn calculate_depth_of_type(
+        &self,
+        ty: &Type,
+        checksum_storage: &dyn ChecksumStorage,
+    ) -> PartialVMResult<DepthFormula> {
         Ok(match ty {
             Type::Bool
             | Type::U8
@@ -1591,18 +1688,18 @@ impl Loader {
             | Type::U32
             | Type::U256 => DepthFormula::constant(1),
             Type::Vector(ty) => {
-                let mut inner = self.calculate_depth_of_type(ty)?;
+                let mut inner = self.calculate_depth_of_type(ty, checksum_storage)?;
                 inner.scale(1);
                 inner
             }
             Type::Reference(ty) | Type::MutableReference(ty) => {
-                let mut inner = self.calculate_depth_of_type(ty)?;
+                let mut inner = self.calculate_depth_of_type(ty, checksum_storage)?;
                 inner.scale(1);
                 inner
             }
             Type::TyParam(ty_idx) => DepthFormula::type_parameter(*ty_idx),
             Type::Struct { id, .. } => {
-                let mut struct_formula = self.calculate_depth_of_struct(id)?;
+                let mut struct_formula = self.calculate_depth_of_struct(id, checksum_storage)?;
                 debug_assert!(struct_formula.terms.is_empty());
                 struct_formula.scale(1);
                 struct_formula
@@ -1613,10 +1710,10 @@ impl Loader {
                     .enumerate()
                     .map(|(idx, ty)| {
                         let var = idx as TypeParameterIndex;
-                        Ok((var, self.calculate_depth_of_type(ty)?))
+                        Ok((var, self.calculate_depth_of_type(ty, checksum_storage)?))
                     })
                     .collect::<PartialVMResult<BTreeMap<_, _>>>()?;
-                let struct_formula = self.calculate_depth_of_struct(id)?;
+                let struct_formula = self.calculate_depth_of_struct(id, checksum_storage)?;
                 let mut subst_struct_formula = struct_formula.subst(ty_arg_map)?;
                 subst_struct_formula.scale(1);
                 subst_struct_formula
@@ -1624,37 +1721,47 @@ impl Loader {
         })
     }
 
-    pub(crate) fn type_to_type_tag(&self, ty: &Type) -> PartialVMResult<TypeTag> {
+    pub(crate) fn type_to_type_tag(
+        &self,
+        ty: &Type,
+        checksum_storage: &dyn ChecksumStorage,
+    ) -> PartialVMResult<TypeTag> {
         let mut gas_context = PseudoGasContext {
             cost: 0,
             max_cost: self.vm_config.type_max_cost,
             cost_base: self.vm_config.type_base_cost,
             cost_per_byte: self.vm_config.type_byte_cost,
         };
-        self.type_to_type_tag_impl(ty, &mut gas_context)
+        self.type_to_type_tag_impl(ty, &mut gas_context, checksum_storage)
     }
 
     pub(crate) fn type_to_type_layout_with_identifier_mappings(
         &self,
         ty: &Type,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<(MoveTypeLayout, bool)> {
         let mut count = 0;
-        self.type_to_type_layout_impl(ty, &mut count, 1)
+        self.type_to_type_layout_impl(ty, &mut count, 1, checksum_storage)
     }
 
-    pub(crate) fn type_to_type_layout(&self, ty: &Type) -> PartialVMResult<MoveTypeLayout> {
+    pub(crate) fn type_to_type_layout(
+        &self,
+        ty: &Type,
+        checksum_storage: &dyn ChecksumStorage,
+    ) -> PartialVMResult<MoveTypeLayout> {
         let mut count = 0;
         let (layout, _has_identifier_mappings) =
-            self.type_to_type_layout_impl(ty, &mut count, 1)?;
+            self.type_to_type_layout_impl(ty, &mut count, 1, checksum_storage)?;
         Ok(layout)
     }
 
     pub(crate) fn type_to_fully_annotated_layout(
         &self,
         ty: &Type,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<MoveTypeLayout> {
         let mut count = 0;
-        self.type_to_fully_annotated_layout_impl(ty, &mut count, 1)
+        self.type_to_fully_annotated_layout_impl(ty, &mut count, 1, checksum_storage)
     }
 }
 
@@ -1663,20 +1770,22 @@ impl Loader {
     pub fn get_type_layout(
         &self,
         type_tag: &TypeTag,
-        move_storage: &dyn ModuleStorage,
+        module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<MoveTypeLayout> {
-        let ty = self.load_type(type_tag, move_storage)?;
-        self.type_to_type_layout(&ty)
+        let ty = self.load_type(type_tag, module_storage, checksum_storage)?;
+        self.type_to_type_layout(&ty, checksum_storage)
             .map_err(|e| e.finish(Location::Undefined))
     }
 
     pub fn get_fully_annotated_type_layout(
         &self,
         type_tag: &TypeTag,
-        move_storage: &dyn ModuleStorage,
+        module_storage: &dyn ModuleStorage,
+        checksum_storage: &dyn ChecksumStorage,
     ) -> VMResult<MoveTypeLayout> {
-        let ty = self.load_type(type_tag, move_storage)?;
-        self.type_to_fully_annotated_layout(&ty)
+        let ty = self.load_type(type_tag, module_storage, checksum_storage)?;
+        self.type_to_fully_annotated_layout(&ty, checksum_storage)
             .map_err(|e| e.finish(Location::Undefined))
     }
 }
