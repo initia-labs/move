@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    checksum_cache::TransactionChecksumCache, data_cache::TransactionDataCache,
+    session_cache::SessionCache, data_cache::TransactionDataCache,
     interpreter::Interpreter, loader::Resolver, native_extensions::NativeContextExtensions,
 };
 use move_binary_format::errors::{
@@ -96,7 +96,7 @@ impl NativeFunctions {
 pub struct NativeContext<'a, 'b, 'c, 'd> {
     interpreter: &'a mut Interpreter,
     data_store: &'a mut TransactionDataCache<'c>,
-    checksum_store: &'a TransactionChecksumCache<'d>,
+    checksum_store: &'a SessionCache<'d>,
     resolver: &'a Resolver<'a>,
     extensions: &'a mut NativeContextExtensions<'b>,
     gas_balance: InternalGas,
@@ -106,7 +106,7 @@ impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
     pub(crate) fn new(
         interpreter: &'a mut Interpreter,
         data_store: &'a mut TransactionDataCache<'c>,
-        checksum_store: &'a TransactionChecksumCache<'d>,
+        checksum_store: &'a SessionCache<'d>,
         resolver: &'a Resolver<'a>,
         extensions: &'a mut NativeContextExtensions<'b>,
         gas_balance: InternalGas,

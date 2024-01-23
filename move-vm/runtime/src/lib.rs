@@ -10,7 +10,6 @@
 //! other blockchains can use it as well. The VM isn't there yet, but hopefully will be there
 //! soon.
 
-pub mod checksum_cache;
 pub mod data_cache;
 mod interpreter;
 pub mod loader;
@@ -20,6 +19,7 @@ pub mod native_extensions;
 pub mod native_functions;
 mod runtime;
 pub mod session;
+pub mod session_cache;
 #[macro_use]
 pub mod tracing;
 pub mod config;

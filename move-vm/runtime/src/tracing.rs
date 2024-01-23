@@ -6,7 +6,7 @@
 use crate::debug::DebugContext;
 #[cfg(any(debug_assertions, feature = "debugging"))]
 use crate::{
-    checksum_cache::TransactionChecksumCache,
+    session_cache::SessionCache,
     interpreter::Interpreter,
     loader::{Function, Loader},
 };
@@ -74,7 +74,7 @@ pub(crate) fn trace(
     pc: u16,
     instr: &Bytecode,
     loader: &Loader,
-    checksum_store: &TransactionChecksumCache,
+    checksum_store: &SessionCache,
     interp: &Interpreter,
 ) {
     if *TRACING_ENABLED {

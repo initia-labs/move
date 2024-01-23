@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    checksum_cache::TransactionChecksumCache,
+    session_cache::SessionCache,
     interpreter::Interpreter,
     loader::{Function, Loader},
 };
@@ -106,7 +106,7 @@ impl DebugContext {
         pc: u16,
         instr: &Bytecode,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         interp: &Interpreter,
     ) {
         let instr_string = format!("{:?}", instr);

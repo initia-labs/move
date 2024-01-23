@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    checksum_cache::TransactionChecksumCache,
+    session_cache::SessionCache,
     data_cache::TransactionDataCache,
     loader::{ChecksumStorage, Function, Loader, Resolver},
     native_extensions::NativeContextExtensions,
@@ -76,7 +76,7 @@ impl Interpreter {
         ty_args: Vec<Type>,
         args: Vec<Value>,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         loader: &Loader,
@@ -108,7 +108,7 @@ impl Interpreter {
         mut self,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         function: Arc<Function>,
@@ -285,7 +285,7 @@ impl Interpreter {
     fn make_call_frame(
         &mut self,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         func: Arc<Function>,
         ty_args: Vec<Type>,
     ) -> PartialVMResult<Frame> {
@@ -323,7 +323,7 @@ impl Interpreter {
     fn make_new_frame(
         &self,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         function: Arc<Function>,
         ty_args: Vec<Type>,
         locals: Locals,
@@ -356,7 +356,7 @@ impl Interpreter {
         &mut self,
         resolver: &Resolver,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         function: Arc<Function>,
@@ -394,7 +394,7 @@ impl Interpreter {
         &mut self,
         resolver: &Resolver,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         function: Arc<Function>,
@@ -562,7 +562,7 @@ impl Interpreter {
     fn load_resource<'c>(
         loader: &Loader,
         data_store: &'c mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
@@ -591,7 +591,7 @@ impl Interpreter {
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
@@ -620,7 +620,7 @@ impl Interpreter {
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
@@ -646,7 +646,7 @@ impl Interpreter {
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
@@ -693,7 +693,7 @@ impl Interpreter {
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
@@ -768,7 +768,7 @@ impl Interpreter {
         &self,
         buf: &mut B,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         idx: usize,
         frame: &Frame,
     ) -> PartialVMResult<()> {
@@ -833,7 +833,7 @@ impl Interpreter {
         &self,
         buf: &mut B,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
     ) -> PartialVMResult<()> {
         debug_writeln!(buf, "Call Stack:")?;
         for (i, frame) in self.call_stack.0.iter().enumerate() {
@@ -1073,7 +1073,7 @@ impl CallStack {
 
 fn check_depth_of_type(
     resolver: &Resolver,
-    checksum_store: &TransactionChecksumCache,
+    checksum_store: &SessionCache,
     ty: &Type,
 ) -> PartialVMResult<()> {
     // Start at 1 since we always call this right before we add a new node to the value's depth.
@@ -1087,7 +1087,7 @@ fn check_depth_of_type(
 
 fn check_depth_of_type_impl(
     resolver: &Resolver,
-    checksum_store: &TransactionChecksumCache,
+    checksum_store: &SessionCache,
     ty: &Type,
     max_depth: u64,
     depth: u64,
@@ -1198,7 +1198,7 @@ impl Frame {
         resolver: &Resolver,
         interpreter: &mut Interpreter,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
     ) -> VMResult<ExitCode> {
         self.execute_code_impl(resolver, interpreter, data_store, checksum_store, gas_meter)
@@ -1814,7 +1814,7 @@ impl Frame {
         resolver: &Resolver,
         interpreter: &mut Interpreter,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
     ) -> PartialVMResult<ExitCode> {
         use SimpleInstruction as S;
@@ -2474,7 +2474,7 @@ impl Frame {
     fn resolver<'a>(
         &self,
         loader: &'a Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
     ) -> Resolver<'a> {
         self.function.get_resolver(loader, checksum_store)
     }

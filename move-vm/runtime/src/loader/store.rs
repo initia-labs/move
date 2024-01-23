@@ -5,7 +5,7 @@ use move_binary_format::errors::PartialVMResult;
 use move_core_types::language_storage::ModuleId;
 use move_vm_types::loaded_data::runtime_types::Checksum;
 
-use crate::checksum_cache::TransactionChecksumCache;
+use crate::session_cache::SessionCache;
 
 pub trait ModuleStorage {
     fn load_module(&self, module_id: &ModuleId) -> PartialVMResult<Bytes>;
@@ -16,13 +16,13 @@ pub trait ChecksumStorage {
 }
 
 pub(crate) struct ChecksumStorageForVerify<'r> {
-    checksum_cache: &'r TransactionChecksumCache<'r>,
+    checksum_cache: &'r SessionCache<'r>,
     checksums: &'r HashMap<ModuleId, Checksum>,
 }
 
 impl<'r> ChecksumStorageForVerify<'r> {
     pub(crate) fn new(
-        checksum_cache: &'r TransactionChecksumCache,
+        checksum_cache: &'r SessionCache,
         checksums: &'r HashMap<ModuleId, Checksum>,
     ) -> Self {
         Self {

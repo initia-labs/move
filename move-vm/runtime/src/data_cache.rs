@@ -2,10 +2,7 @@
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    checksum_cache::TransactionChecksumCache,
-    loader::{Loader, ModuleStorage},
-};
+use crate::{loader::Loader, session_cache::SessionCache};
 use bytes::Bytes;
 use move_binary_format::errors::*;
 use move_core_types::{
@@ -61,12 +58,6 @@ pub struct TransactionDataCache<'r> {
     account_map: BTreeMap<AccountAddress, AccountDataCache>,
 }
 
-impl<'r> ModuleStorage for TransactionDataCache<'r> {
-    fn load_module(&self, module_id: &ModuleId) -> PartialVMResult<Bytes> {
-        self.load_module(module_id)
-    }
-}
-
 impl<'r> TransactionDataCache<'r> {
     /// Create a `TransactionDataCache` with a `RemoteCache` that provides access to data
     /// not updated in the transaction.
@@ -84,7 +75,7 @@ impl<'r> TransactionDataCache<'r> {
     pub(crate) fn into_effects(
         self,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
     ) -> PartialVMResult<ChangeSet> {
         let resource_converter =
             |value: Value, layout: MoveTypeLayout, _: bool| -> PartialVMResult<Bytes> {
@@ -105,7 +96,7 @@ impl<'r> TransactionDataCache<'r> {
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
     ) -> PartialVMResult<Changes<Bytes, [u8; 32], Resource>> {
         let mut change_set = Changes::<Bytes, [u8; 32], Resource>::new();
 
@@ -188,7 +179,7 @@ impl<'r> TransactionDataCache<'r> {
     pub(crate) fn load_resource(
         &mut self,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<(&mut GlobalValue, Option<NumBytes>)> {
@@ -269,27 +260,10 @@ impl<'r> TransactionDataCache<'r> {
         ))
     }
 
-    pub(crate) fn load_module(&self, module_id: &ModuleId) -> PartialVMResult<Bytes> {
-        if let Some(account_cache) = self.account_map.get(module_id.address()) {
-            if let Some((blob, _is_republishing)) = account_cache.module_map.get(module_id.name()) {
-                return Ok(blob.clone());
-            }
-        }
-        match self.remote.get_module(module_id)? {
-            Some(bytes) => Ok(bytes),
-            None => Err(
-                PartialVMError::new(StatusCode::LINKER_ERROR).with_message(format!(
-                    "Linker Error: Cannot find {:?} in data cache",
-                    module_id
-                )),
-            ),
-        }
-    }
-
     pub(crate) fn publish_module(
         &mut self,
         module_id: &ModuleId,
-        blob: Vec<u8>,
+        blob: Bytes,
         checksum: [u8; 32],
         is_republishing: bool,
     ) -> VMResult<()> {
@@ -300,7 +274,7 @@ impl<'r> TransactionDataCache<'r> {
 
         account_cache
             .module_map
-            .insert(module_id.name().to_owned(), (blob.into(), is_republishing));
+            .insert(module_id.name().to_owned(), (blob, is_republishing));
 
         account_cache.checksum_map.insert(
             module_id.name().to_owned(),
@@ -308,18 +282,5 @@ impl<'r> TransactionDataCache<'r> {
         );
 
         Ok(())
-    }
-
-    pub(crate) fn exists_module(&self, module_id: &ModuleId) -> VMResult<bool> {
-        if let Some(account_cache) = self.account_map.get(module_id.address()) {
-            if account_cache.module_map.contains_key(module_id.name()) {
-                return Ok(true);
-            }
-        }
-        Ok(self
-            .remote
-            .get_module(module_id)
-            .map_err(|e| e.finish(Location::Undefined))?
-            .is_some())
     }
 }

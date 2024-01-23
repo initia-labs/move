@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    checksum_cache::TransactionChecksumCache, config::VMConfig, data_cache::TransactionDataCache,
-    native_extensions::NativeContextExtensions, native_functions::NativeFunction,
-    runtime::VMRuntime, session::Session,
+    config::VMConfig, data_cache::TransactionDataCache, native_extensions::NativeContextExtensions,
+    native_functions::NativeFunction, runtime::VMRuntime, session::Session,
+    session_cache::SessionCache,
 };
 use move_binary_format::errors::{Location, PartialVMError, VMResult};
 use move_core_types::{
@@ -64,20 +64,19 @@ impl MoveVM {
         Session {
             move_vm: self,
             data_cache: TransactionDataCache::new(remote),
-            checksum_cache: TransactionChecksumCache::new(remote),
+            session_cache: SessionCache::new(remote),
             native_extensions,
         }
     }
 
     pub fn get_fully_annotated_type_layout(
         &self,
-        data_cache: &TransactionDataCache,
-        checksum_cache: &TransactionChecksumCache,
+        session_cache: &SessionCache,
         type_tag: &TypeTag,
     ) -> VMResult<MoveTypeLayout> {
         self.runtime
             .loader
-            .get_fully_annotated_type_layout(type_tag, data_cache, checksum_cache)
+            .get_fully_annotated_type_layout(type_tag, session_cache, session_cache)
     }
 
     pub fn flush_unused_module_cache(&mut self) {

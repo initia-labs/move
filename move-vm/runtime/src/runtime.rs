@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    checksum_cache::TransactionChecksumCache,
     config::VMConfig,
     data_cache::TransactionDataCache,
     interpreter::Interpreter,
@@ -11,7 +10,9 @@ use crate::{
     native_extensions::NativeContextExtensions,
     native_functions::{NativeFunction, NativeFunctions},
     session::{LoadedFunctionInstantiation, SerializedReturnValues},
+    session_cache::SessionCache,
 };
+use bytes::Bytes;
 use move_binary_format::{
     access::ModuleAccess,
     compatibility::Compatibility,
@@ -60,7 +61,7 @@ impl VMRuntime {
         sender: AccountAddress,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        checksum_store: &mut TransactionChecksumCache,
+        session_cache: &mut SessionCache,
         _gas_meter: &mut impl GasMeter,
         compat: Compatibility,
     ) -> VMResult<()> {
@@ -124,8 +125,9 @@ impl VMRuntime {
         for module in &compiled_modules {
             let module_id = module.self_id();
 
-            if data_store.exists_module(&module_id)? && compat.need_check_compat() {
-                let old_module_ref = loader.load_module(&module_id, data_store, checksum_store)?;
+            if session_cache.exists_module(&module_id)? && compat.need_check_compat() {
+                let old_module_ref =
+                    loader.load_module(&module_id, session_cache, session_cache)?;
                 let old_module = old_module_ref.compiled_module();
                 let old_m = normalized::Module::new(old_module);
                 let new_m = normalized::Module::new(module);
@@ -142,8 +144,8 @@ impl VMRuntime {
         // Perform bytecode and loading verification. Modules must be sorted in topological order.
         loader.verify_module_bundle_for_publication(
             &compiled_modules,
-            data_store,
-            &ChecksumStorageForVerify::new(checksum_store, &checksums),
+            session_cache,
+            &ChecksumStorageForVerify::new(session_cache, &checksums),
         )?;
 
         // NOTE: we want to (informally) argue that all modules pass the linking check before being
@@ -203,10 +205,11 @@ impl VMRuntime {
         for (module, blob) in compiled_modules.into_iter().zip(modules.into_iter()) {
             let module_id = module.self_id();
             let checksum = checksums.remove(&module_id).unwrap();
-            let is_republishing = data_store.exists_module(&module_id)?;
+            let is_republishing = session_cache.exists_module(&module_id)?;
 
-            data_store.publish_module(&module_id, blob, checksum, is_republishing)?;
-            checksum_store.update_checksum(&module_id, checksum);
+            let module_bytes: Bytes = blob.into();
+            session_cache.record_publish(&module_id, module_bytes.clone(), checksum);
+            data_store.publish_module(&module_id, module_bytes, checksum, is_republishing)?;
         }
         Ok(())
     }
@@ -214,7 +217,7 @@ impl VMRuntime {
     fn deserialize_value(
         &self,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         ty: &Type,
         arg: impl Borrow<[u8]>,
     ) -> PartialVMResult<Value> {
@@ -240,7 +243,7 @@ impl VMRuntime {
     fn deserialize_args(
         &self,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         arg_tys: Vec<Type>,
         serialized_args: Vec<impl Borrow<[u8]>>,
     ) -> PartialVMResult<(Locals, Vec<Value>)> {
@@ -284,7 +287,7 @@ impl VMRuntime {
     fn serialize_return_value(
         &self,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         ty: &Type,
         value: Value,
     ) -> PartialVMResult<(Vec<u8>, MoveTypeLayout)> {
@@ -329,7 +332,7 @@ impl VMRuntime {
     fn serialize_return_values(
         &self,
         loader: &Loader,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         return_types: &[Type],
         return_values: Vec<Value>,
     ) -> PartialVMResult<Vec<(Vec<u8>, MoveTypeLayout)>> {
@@ -362,7 +365,7 @@ impl VMRuntime {
         serialized_args: Vec<impl Borrow<[u8]>>,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
     ) -> VMResult<SerializedReturnValues> {
@@ -436,14 +439,19 @@ impl VMRuntime {
         serialized_args: Vec<impl Borrow<[u8]>>,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        session_cache: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         bypass_declared_entry_check: bool,
     ) -> VMResult<SerializedReturnValues> {
         // load the function
-        let (module, function, instantiation) =
-            loader.load_function(module, function_name, &ty_args, data_store, checksum_store)?;
+        let (module, function, instantiation) = loader.load_function(
+            module,
+            function_name,
+            &ty_args,
+            session_cache,
+            session_cache,
+        )?;
 
         self.execute_function_instantiation(
             LoadedFunction { module, function },
@@ -451,7 +459,7 @@ impl VMRuntime {
             serialized_args,
             loader,
             data_store,
-            checksum_store,
+            session_cache,
             gas_meter,
             extensions,
             bypass_declared_entry_check,
@@ -465,7 +473,7 @@ impl VMRuntime {
         serialized_args: Vec<impl Borrow<[u8]>>,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         bypass_declared_entry_check: bool,
@@ -529,7 +537,7 @@ impl VMRuntime {
         serialized_args: Vec<impl Borrow<[u8]>>,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        checksum_store: &TransactionChecksumCache,
+        session_cache: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
     ) -> VMResult<SerializedReturnValues> {
@@ -541,7 +549,7 @@ impl VMRuntime {
                 parameters,
                 return_,
             },
-        ) = loader.load_script(script.borrow(), &ty_args, data_store, checksum_store)?;
+        ) = loader.load_script(script.borrow(), &ty_args, session_cache, session_cache)?;
         // execute the function
         self.execute_function_impl(
             func,
@@ -551,7 +559,7 @@ impl VMRuntime {
             serialized_args,
             loader,
             data_store,
-            checksum_store,
+            session_cache,
             gas_meter,
             extensions,
         )
