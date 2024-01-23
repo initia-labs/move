@@ -1,7 +1,6 @@
-pub mod loader;
-
 mod cache;
 mod function;
+mod loader_impl;
 mod module;
 mod resolver;
 mod script;
@@ -13,6 +12,6 @@ pub(crate) use resolver::Resolver;
 pub(crate) use store::{ChecksumStorage, ChecksumStorageForVerify, ModuleStorage};
 
 pub use function::LoadedFunction;
-pub use loader::Loader;
+pub use loader_impl::Loader;
 
 use move_vm_types::loaded_data::runtime_types::Checksum;

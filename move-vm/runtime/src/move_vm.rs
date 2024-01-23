@@ -79,11 +79,11 @@ impl MoveVM {
             .get_fully_annotated_type_layout(type_tag, session_cache, session_cache)
     }
 
-    pub fn flush_unused_module_cache(&mut self) {
+    pub fn flush_unused_module_cache(&self) {
         self.runtime.loader.flush_unused_module_cache()
     }
 
-    pub fn flush_unused_script_cache(&mut self) {
+    pub fn flush_unused_script_cache(&self) {
         self.runtime.loader.flush_unused_script_cache()
     }
 }

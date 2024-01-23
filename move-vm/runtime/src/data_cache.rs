@@ -278,7 +278,7 @@ impl<'r> TransactionDataCache<'r> {
 
         account_cache.checksum_map.insert(
             module_id.name().to_owned(),
-            (checksum.into(), is_republishing),
+            (checksum, is_republishing),
         );
 
         Ok(())

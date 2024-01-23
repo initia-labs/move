@@ -228,6 +228,7 @@ impl Loader {
     // Module verification and loading
     //
 
+    #[allow(clippy::type_complexity)]
     // Loading verifies the module if it was never loaded.
     fn load_function_without_type_args(
         &self,
@@ -678,7 +679,12 @@ impl Loader {
     }
 
     // The interface to cleanup the unused modules from the cache.
-    pub fn flush_unused_module_cache(&mut self) {
+    pub fn flush_unused_module_cache(&self) {
+        // flush operation holds all loader locks, so good to avoid frequent flushing.
+        if self.removed_modules.read().len() < self.vm_config.module_cache_capacity / 10 {
+            return;
+        }
+
         let mut type_cache = self.type_cache.write();
         let mut module_cache = self.module_cache.write();
         let mut removed_modules = self.removed_modules.write();
@@ -697,7 +703,12 @@ impl Loader {
     }
 
     // The interface to cleanup the unused modules from the cache.
-    pub fn flush_unused_script_cache(&mut self) {
+    pub fn flush_unused_script_cache(&self) {
+        // flush operation holds all loader locks, so good to avoid frequent flushing.
+        if self.removed_scripts.read().len() < self.vm_config.script_cache_capacity / 10 {
+            return;
+        }
+
         let mut script_cache = self.script_cache.write();
         let mut removed_scripts = self.removed_scripts.write();
         let script_cache_hits = self.script_cache_hits.read();
@@ -809,6 +820,7 @@ impl Loader {
         Ok(module)
     }
 
+    #[allow(clippy::too_many_arguments)]
     // Everything in `load_and_verify_module` and also recursively load and verify all the
     // dependencies of the target module.
     fn load_and_verify_module_and_dependencies(
@@ -871,6 +883,7 @@ impl Loader {
         Ok(module_ref)
     }
 
+    #[allow(clippy::too_many_arguments)]
     // downward exploration of the module's dependency graph
     fn load_and_verify_dependencies(
         &self,
@@ -943,6 +956,7 @@ impl Loader {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     // Everything in `load_and_verify_module_and_dependencies` and also recursively load and verify
     // all the friends modules of the newly loaded modules, until the friends frontier covers the
     // whole closure.
@@ -985,6 +999,7 @@ impl Loader {
         Ok(module_ref)
     }
 
+    #[allow(clippy::too_many_arguments)]
     // upward exploration of the module's dependency graph
     fn load_and_verify_friends(
         &self,
@@ -1023,16 +1038,15 @@ impl Loader {
             .into_iter()
             .map(|mid| {
                 checksum_storage
-                    .load_checksum(&mid)
-                    .and_then(|checksum| Ok((mid.clone(), checksum)))
+                    .load_checksum(&mid).map(|checksum| (mid.clone(), checksum))
                     .map_err(|e| e.finish(Location::Undefined))
             })
             .collect::<VMResult<Vec<(ModuleId, Checksum)>>>()?
             .into_iter()
             .filter(|(mid, checksum)| {
-                !locked_module_cache.has(&checksum)
-                    && !bundle_verified.contains_key(&mid)
-                    && !bundle_unverified.contains(&mid)
+                !locked_module_cache.has(checksum)
+                    && !bundle_verified.contains_key(mid)
+                    && !bundle_unverified.contains(mid)
             })
             .collect();
         drop(locked_module_cache); // explicit unlock
@@ -1533,7 +1547,7 @@ impl Loader {
         // explicitly drop
         drop(locked_type_cache);
 
-        let struct_type = self.get_struct_type_by_identifier(&id, checksum_storage)?;
+        let struct_type = self.get_struct_type_by_identifier(id, checksum_storage)?;
         if struct_type.fields.len() != struct_type.field_names.len() {
             return Err(
                 PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR).with_message(

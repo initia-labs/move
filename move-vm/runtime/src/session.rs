@@ -306,6 +306,7 @@ impl<'r, 'l> Session<'r, 'l> {
         Ok((change_set, native_extensions))
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn finish_with_extensions_with_custom_effects<Resource>(
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
@@ -468,7 +469,7 @@ impl<'r, 'l> Session<'r, 'l> {
         self.move_vm
             .runtime
             .loader
-            .get_struct_type_by_identifier(&id, &self.session_cache)
+            .get_struct_type_by_identifier(id, &self.session_cache)
             .ok()
     }
 

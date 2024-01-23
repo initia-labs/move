@@ -211,7 +211,7 @@ impl Module {
                             | Bytecode::VecUnpack(si, _)
                             | Bytecode::VecSwap(si) => {
                                 if !single_signature_token_map.contains_key(si) {
-                                    let ty = match module.signature_at(*si).0.get(0) {
+                                    let ty = match module.signature_at(*si).0.first() {
                                         None => {
                                             return Err(PartialVMError::new(
                                                 StatusCode::VERIFIER_INVARIANT_VIOLATION,
@@ -370,7 +370,7 @@ impl Module {
         {
             Some(func) => Ok(func.clone()),
             None => {
-                return Err(PartialVMError::new(StatusCode::FUNCTION_RESOLUTION_FAILURE)
+                Err(PartialVMError::new(StatusCode::FUNCTION_RESOLUTION_FAILURE)
                     .with_message(format!(
                         "Cannot find {:?}::{:?} in cache",
                         self.id, function_name

@@ -69,6 +69,7 @@ impl<'a, 'b, 'c> TypeView for TypeWithLoader<'a, 'b, 'c> {
 }
 
 impl Interpreter {
+    #[allow(clippy::too_many_arguments)]
     /// Entrypoint into the interpreter. All external calls need to be routed through this
     /// function.
     pub(crate) fn entrypoint(
@@ -98,6 +99,7 @@ impl Interpreter {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Main loop for the execution of a function.
     ///
     /// This function sets up a `Frame` and calls `execute_code_unit` to execute code of the
@@ -132,7 +134,7 @@ impl Interpreter {
             .make_new_frame(loader, checksum_store, function, ty_args, locals)
             .map_err(|err| self.set_location(err))?;
         loop {
-            let resolver = current_frame.resolver(loader, &checksum_store);
+            let resolver = current_frame.resolver(loader, checksum_store);
             let exit_code =
                 current_frame //self
                     .execute_code(&resolver, &mut self, data_store, checksum_store, gas_meter)
@@ -351,6 +353,7 @@ impl Interpreter {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Call a native functions.
     fn call_native(
         &mut self,
@@ -390,6 +393,7 @@ impl Interpreter {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn call_native_impl(
         &mut self,
         resolver: &Resolver,
@@ -584,6 +588,7 @@ impl Interpreter {
         Ok(gv)
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// BorrowGlobal (mutable and not) opcode.
     fn borrow_global(
         &mut self,
@@ -614,6 +619,7 @@ impl Interpreter {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Exists opcode.
     fn exists(
         &mut self,
@@ -640,6 +646,7 @@ impl Interpreter {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// MoveFrom opcode.
     fn move_from(
         &mut self,
@@ -687,6 +694,7 @@ impl Interpreter {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// MoveTo opcode.
     fn move_to(
         &mut self,
@@ -2026,7 +2034,7 @@ impl Frame {
                     Bytecode::Pack(sd_idx) => {
                         let field_count = resolver.field_count(*sd_idx);
                         let struct_type = resolver.get_struct_type(*sd_idx)?;
-                        check_depth_of_type(resolver, &checksum_store, &struct_type)?;
+                        check_depth_of_type(resolver, checksum_store, &struct_type)?;
                         gas_meter.charge_pack(
                             false,
                             interpreter.operand_stack.last_n(field_count as usize)?,
@@ -2039,7 +2047,7 @@ impl Frame {
                     Bytecode::PackGeneric(si_idx) => {
                         let field_count = resolver.field_instantiation_count(*si_idx);
                         let ty = resolver.get_struct_type_generic(*si_idx, self.ty_args())?;
-                        check_depth_of_type(resolver, &checksum_store, &ty)?;
+                        check_depth_of_type(resolver, checksum_store, &ty)?;
                         gas_meter.charge_pack(
                             true,
                             interpreter.operand_stack.last_n(field_count as usize)?,
@@ -2364,7 +2372,7 @@ impl Frame {
                     }
                     Bytecode::VecPack(si, num) => {
                         let ty = resolver.instantiate_single_type(*si, self.ty_args())?;
-                        check_depth_of_type(resolver, &checksum_store, &ty)?;
+                        check_depth_of_type(resolver, checksum_store, &ty)?;
                         gas_meter.charge_vec_pack(
                             make_ty!(&ty),
                             interpreter.operand_stack.last_n(*num as usize)?,

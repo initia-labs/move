@@ -93,7 +93,7 @@ impl<'r> SessionCache<'r> {
         match self.remote.get_module(module_id)? {
             Some(bytes) => {
                 self.modules.write().insert(module_id.clone(), bytes.clone());
-                Ok(bytes.into())
+                Ok(bytes)
             },
             None => Err(
                 PartialVMError::new(StatusCode::LINKER_ERROR).with_message(format!(

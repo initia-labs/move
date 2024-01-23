@@ -55,6 +55,7 @@ impl VMRuntime {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn publish_module_bundle(
         &self,
         modules: Vec<Vec<u8>>,
@@ -355,6 +356,7 @@ impl VMRuntime {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::needless_collect)]
     fn execute_function_impl(
         &self,
@@ -399,7 +401,7 @@ impl VMRuntime {
             checksum_store,
             gas_meter,
             extensions,
-            &loader,
+            loader,
         )?;
 
         let serialized_return_values = self
@@ -416,7 +418,7 @@ impl VMRuntime {
                         .enable_invariant_violation_check_in_swap_loc,
                 )?;
                 let (bytes, layout) =
-                    self.serialize_return_value(loader, &checksum_store, &ty, local_val)?;
+                    self.serialize_return_value(loader, checksum_store, &ty, local_val)?;
                 Ok((idx as LocalIndex, bytes, layout))
             })
             .collect::<PartialVMResult<_>>()
@@ -431,6 +433,7 @@ impl VMRuntime {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_function(
         &self,
         module: &ModuleId,
@@ -466,6 +469,7 @@ impl VMRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_function_instantiation(
         &self,
         func: LoadedFunction,
@@ -529,6 +533,7 @@ impl VMRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     // See Session::execute_script for what contracts to follow.
     pub(crate) fn execute_script(
         &self,

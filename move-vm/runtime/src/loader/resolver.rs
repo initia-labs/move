@@ -13,7 +13,7 @@ use move_core_types::{value::MoveTypeLayout, vm_status::StatusCode};
 use move_vm_types::loaded_data::runtime_types::{AbilityInfo, StructType, Type};
 
 use super::{
-    function::Function, loader::MAX_TYPE_INSTANTIATION_NODES, module::Module, script::Script,
+    function::Function, loader_impl::MAX_TYPE_INSTANTIATION_NODES, module::Module, script::Script,
     ChecksumStorage, Loader,
 };
 

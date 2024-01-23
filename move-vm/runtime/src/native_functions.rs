@@ -125,7 +125,7 @@ impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
 impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
     pub fn print_stack_trace<B: Write>(&self, buf: &mut B) -> PartialVMResult<()> {
         self.interpreter
-            .debug_print_stack_trace(buf, self.resolver.loader(), &self.checksum_store)
+            .debug_print_stack_trace(buf, self.resolver.loader(), self.checksum_store)
     }
 
     pub fn exists_at(
@@ -135,7 +135,7 @@ impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
     ) -> VMResult<(bool, Option<NumBytes>)> {
         let (value, num_bytes) = self
             .data_store
-            .load_resource(self.resolver.loader(), &self.checksum_store, address, type_)
+            .load_resource(self.resolver.loader(), self.checksum_store, address, type_)
             .map_err(|err| err.finish(Location::Undefined))?;
         let exists = value
             .exists()

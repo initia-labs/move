@@ -99,6 +99,7 @@ impl DebugContext {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn debug_loop(
         &mut self,
         function_desc: &Function,

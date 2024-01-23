@@ -229,7 +229,7 @@ impl CacheHitRecords {
     pub(crate) fn create(&mut self, checksum: Checksum) -> Option<Checksum> {
         // Pop least recently used cache item if the cache is full
         let popped_elem = if self.checksums.len() == self.checksums.cap().into() {
-            self.checksums.pop_lru().and_then(|(k, _)| Some(k))
+            self.checksums.pop_lru().map(|(k, _)| k)
         } else {
             None
         };
