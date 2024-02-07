@@ -12,7 +12,7 @@ pub trait ModuleStorage {
 }
 
 pub trait ChecksumStorage {
-    fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<[u8; 32]>;
+    fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<Checksum>;
 }
 
 pub(crate) struct ChecksumStorageForVerify<'r> {
@@ -32,7 +32,7 @@ impl<'r> ChecksumStorageForVerify<'r> {
     }
 }
 impl<'r> ChecksumStorage for ChecksumStorageForVerify<'r> {
-    fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<[u8; 32]> {
+    fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<Checksum> {
         if let Some(checksum) = self.checksums.get(module_id) {
             return Ok(*checksum);
         }

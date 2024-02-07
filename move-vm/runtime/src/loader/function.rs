@@ -4,12 +4,12 @@ use move_binary_format::{
     file_format::{AbilitySet, Bytecode, CompiledModule, FunctionDefinitionIndex, Visibility},
 };
 use move_core_types::{identifier::Identifier, language_storage::ModuleId, vm_status::StatusCode};
-use move_vm_types::loaded_data::runtime_types::Type;
+use move_vm_types::loaded_data::runtime_types::{Checksum, Type};
 use std::{fmt::Debug, sync::Arc};
 
 use crate::native_functions::{NativeFunction, NativeFunctions, UnboxedNativeFunction};
 
-use super::{module::Module, resolver::Resolver, Checksum, ChecksumStorage, Loader};
+use super::{module::Module, resolver::Resolver, ChecksumStorage, Loader};
 
 // A simple wrapper for the "owner" of the function (Module or Script)
 #[derive(Clone, Debug)]

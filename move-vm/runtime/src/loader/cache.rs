@@ -3,14 +3,14 @@ use std::{collections::HashMap, num::NonZeroUsize, sync::Arc};
 use lru::LruCache;
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{
-    identifier::Identifier,
-    language_storage::{ModuleId, StructTag},
-    value::MoveStructLayout,
+    identifier::Identifier, language_storage::StructTag, value::MoveStructLayout,
     vm_status::StatusCode,
 };
-use move_vm_types::loaded_data::runtime_types::{DepthFormula, StructIdentifier, StructType, Type};
+use move_vm_types::loaded_data::runtime_types::{
+    Checksum, DepthFormula, StructIdentifier, StructType, Type,
+};
 
-use super::{function::Function, module::Module, script::Script, Checksum, ChecksumStorage};
+use super::{function::Function, module::Module, script::Script};
 
 pub(crate) struct ModuleCache {
     modules: HashMap<Checksum, Arc<Module>>,
@@ -44,10 +44,9 @@ impl ModuleCache {
 
     pub(crate) fn get_struct_type_by_identifier(
         &self,
+        checksum: &Checksum,
         id: &StructIdentifier,
-        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<Arc<StructType>> {
-        let checksum = checksum_storage.load_checksum(&id.module_id)?;
         self.get(&checksum)
             .and_then(|module| {
                 let idx = module.struct_map.get(&id.name)?;
@@ -73,15 +72,11 @@ impl TypeCache {
         }
     }
 
-    pub(crate) fn create_type_cache_for_module(
-        &mut self,
-        module_id: ModuleId,
-        checksum: Checksum,
-    ) -> Option<TypeCacheItem> {
-        self.types.insert(checksum, TypeCacheItem::new(module_id))
+    pub(crate) fn create_type_cache(&mut self, checksum: Checksum) -> Option<TypeCacheItem> {
+        self.types.insert(checksum, TypeCacheItem::new())
     }
 
-    pub(crate) fn remove_type_cache_for_module(&mut self, checksum: &Checksum) {
+    pub(crate) fn remove_type_cache(&mut self, checksum: &Checksum) {
         self.types.remove(checksum);
     }
 
@@ -91,12 +86,11 @@ impl TypeCache {
 
     pub(crate) fn insert_type(
         &mut self,
+        checksum: &Checksum,
         id: &StructIdentifier,
         ty_args: &[Type],
-        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<&mut StructInfoCache> {
-        let checksum: [u8; 32] = checksum_storage.load_checksum(&id.module_id)?;
-        match self.types.get_mut(&checksum) {
+        match self.types.get_mut(checksum) {
             Some(item) => Ok(item
                 .structs
                 .entry(id.name.clone())
@@ -110,12 +104,11 @@ impl TypeCache {
 
     pub(crate) fn insert_depth_formula(
         &mut self,
+        checksum: &Checksum,
         id: &StructIdentifier,
         depth_formula: DepthFormula,
-        checksum_storage: &dyn ChecksumStorage,
     ) -> PartialVMResult<Option<DepthFormula>> {
-        let checksum: [u8; 32] = checksum_storage.load_checksum(&id.module_id)?;
-        match self.types.get_mut(&checksum) {
+        match self.types.get_mut(checksum) {
             Some(item) => Ok(item.depth_formula.insert(id.name.clone(), depth_formula)),
             None => Err(PartialVMError::new(StatusCode::LINKER_ERROR)
                 .with_message(format!("Cannot find {:x?} in cache", id.module_id))),
@@ -124,15 +117,13 @@ impl TypeCache {
 }
 
 pub(crate) struct TypeCacheItem {
-    pub(crate) module_id: ModuleId,
     pub(crate) structs: HashMap<Identifier, HashMap<Vec<Type>, StructInfoCache>>,
     pub(crate) depth_formula: HashMap<Identifier, DepthFormula>,
 }
 
 impl TypeCacheItem {
-    fn new(module_id: ModuleId) -> Self {
+    fn new() -> Self {
         Self {
-            module_id,
             structs: HashMap::new(),
             depth_formula: HashMap::new(),
         }

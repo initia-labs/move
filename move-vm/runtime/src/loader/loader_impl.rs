@@ -21,7 +21,7 @@ use move_core_types::{
     vm_status::StatusCode,
 };
 use move_vm_types::loaded_data::runtime_types::{
-    AbilityInfo, DepthFormula, StructIdentifier, StructType, Type,
+    AbilityInfo, Checksum, DepthFormula, StructIdentifier, StructType, Type,
 };
 use parking_lot::RwLock;
 use sha3::{Digest, Sha3_256};
@@ -37,7 +37,7 @@ use super::{
     module::Module,
     script::Script,
     store::ModuleStorage,
-    Checksum, ChecksumStorage,
+    ChecksumStorage,
 };
 
 // A Loader is responsible to load scripts and modules and holds the cache of all loaded
@@ -695,7 +695,7 @@ impl Loader {
                 continue;
             }
 
-            type_cache.remove_type_cache_for_module(checksum);
+            type_cache.remove_type_cache(checksum);
             module_cache.remove(checksum);
         }
 
@@ -869,14 +869,11 @@ impl Loader {
         )
         .map_err(|e| e.finish(Location::Undefined))?;
 
-        let module_id = module.id.clone();
         let checksum = module.checksum;
         let module_ref = locked_module_cache.insert(checksum, module);
 
         // create type cache for module
-        self.type_cache
-            .write()
-            .create_type_cache_for_module(module_id, checksum);
+        self.type_cache.write().create_type_cache(checksum);
 
         drop(locked_module_cache); // explicit unlock
 
@@ -1038,7 +1035,8 @@ impl Loader {
             .into_iter()
             .map(|mid| {
                 checksum_storage
-                    .load_checksum(&mid).map(|checksum| (mid.clone(), checksum))
+                    .load_checksum(&mid)
+                    .map(|checksum| (mid.clone(), checksum))
                     .map_err(|e| e.finish(Location::Undefined))
             })
             .collect::<VMResult<Vec<(ModuleId, Checksum)>>>()?
@@ -1232,7 +1230,6 @@ impl Loader {
                 .with_message(format!("Cannot find {:?} in cache", checksum))
         })?;
 
-        let module_id = types.module_id.clone();
         if let Some(struct_map) = types.structs.get(&id.name) {
             if let Some(struct_info) = struct_map.get(ty_args) {
                 if let Some((struct_tag, gas)) = &struct_info.struct_tag {
@@ -1252,8 +1249,8 @@ impl Loader {
             .map(|ty| self.type_to_type_tag_impl(ty, gas_context, checksum_storage))
             .collect::<PartialVMResult<Vec<_>>>()?;
         let struct_tag = StructTag {
-            address: *module_id.address(),
-            module: module_id.name().to_owned(),
+            address: *id.module_id.address(),
+            module: id.module_id.name().to_owned(),
             name: id.name.clone(),
             type_params: ty_arg_tags,
         };
@@ -1264,7 +1261,7 @@ impl Loader {
 
         self.type_cache
             .write()
-            .insert_type(id, ty_args, checksum_storage)?
+            .insert_type(&checksum, id, ty_args)?
             .struct_tag = Some((struct_tag.clone(), gas_context.cost - cur_cost));
 
         Ok(struct_tag)
@@ -1400,7 +1397,7 @@ impl Loader {
         let struct_layout = MoveStructLayout::new(field_layouts);
 
         let mut locked_type_cache = self.type_cache.write();
-        let info = locked_type_cache.insert_type(id, ty_args, checksum_storage)?;
+        let info = locked_type_cache.insert_type(&checksum, id, ty_args)?;
         info.struct_layout_info = Some(StructLayoutInfoCacheItem {
             struct_layout: struct_layout.clone(),
             node_count: field_node_count,
@@ -1586,7 +1583,7 @@ impl Loader {
         let field_node_count = *count - count_before;
 
         let mut locked_type_cache = self.type_cache.write();
-        let info = locked_type_cache.insert_type(id, ty_args, checksum_storage)?;
+        let info = locked_type_cache.insert_type(&checksum, id, ty_args)?;
         info.annotated_struct_layout = Some(struct_layout.clone());
         info.annotated_node_count = Some(field_node_count);
 
@@ -1672,10 +1669,10 @@ impl Loader {
             .map(|field_type| self.calculate_depth_of_type(field_type, checksum_storage))
             .collect::<PartialVMResult<Vec<_>>>()?;
         let formula = DepthFormula::normalize(formulas);
-        let prev =
-            self.type_cache
-                .write()
-                .insert_depth_formula(id, formula.clone(), checksum_storage)?;
+        let prev = self
+            .type_cache
+            .write()
+            .insert_depth_formula(&checksum, id, formula.clone())?;
 
         if prev.is_some() {
             return Err(

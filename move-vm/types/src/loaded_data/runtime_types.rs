@@ -21,6 +21,8 @@ use triomphe::Arc as TriompheArc;
 
 pub const TYPE_DEPTH_MAX: usize = 256;
 
+pub type Checksum = [u8; 32];
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Debug)]
 /// A formula describing the value depth of a type, using (the depths of) the type parameters as inputs.
 ///
@@ -159,8 +161,6 @@ impl StructType {
         Ok(())
     }
 }
-
-pub type Checksum = [u8; 32];
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StructIdentifier {

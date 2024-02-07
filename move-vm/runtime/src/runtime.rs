@@ -76,7 +76,7 @@ impl VMRuntime {
             .map(|blob| {
                 let mut sha3_256 = Sha3_256::new();
                 sha3_256.update(blob);
-                let checksum: [u8; 32] = sha3_256.finalize().into();
+                let checksum: Checksum = sha3_256.finalize().into();
 
                 CompiledModule::deserialize_with_config(
                     blob,

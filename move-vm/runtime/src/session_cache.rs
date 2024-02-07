@@ -26,7 +26,7 @@ pub struct SessionCache<'r> {
 }
 
 impl<'r> ChecksumStorage for SessionCache<'r> {
-    fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<[u8; 32]> {
+    fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<Checksum> {
         if let Some(checksum) = self.checksums.read().get(module_id) {
             return Ok(*checksum);
         }
@@ -67,7 +67,7 @@ impl<'r> SessionCache<'r> {
         &mut self,
         module_id: &ModuleId,
         module_bytes: Bytes,
-        checksum: [u8; 32],
+        checksum: Checksum,
     ) {
         self.modules.write().insert(module_id.clone(), module_bytes);
         self.checksums.write().insert(module_id.clone(), checksum);
@@ -78,11 +78,16 @@ impl<'r> SessionCache<'r> {
             return Ok(true);
         }
 
-        Ok(self
+        if let Some(blob) = self
             .remote
             .get_module(module_id)
             .map_err(|e| e.finish(Location::Undefined))?
-            .is_some())
+        {
+            self.modules.write().insert(module_id.clone(), blob);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub(crate) fn load_module(&self, module_id: &ModuleId) -> PartialVMResult<Bytes> {
@@ -91,10 +96,10 @@ impl<'r> SessionCache<'r> {
         }
 
         match self.remote.get_module(module_id)? {
-            Some(bytes) => {
-                self.modules.write().insert(module_id.clone(), bytes.clone());
-                Ok(bytes)
-            },
+            Some(blob) => {
+                self.modules.write().insert(module_id.clone(), blob.clone());
+                Ok(blob)
+            }
             None => Err(
                 PartialVMError::new(StatusCode::LINKER_ERROR).with_message(format!(
                     "Linker Error: Cannot find {:?} in data cache",

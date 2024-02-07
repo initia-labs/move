@@ -17,7 +17,7 @@ use move_core_types::{
     vm_status::StatusCode,
 };
 use move_vm_types::{
-    loaded_data::runtime_types::Type,
+    loaded_data::runtime_types::{Checksum, Type},
     values::{GlobalValue, Value},
 };
 use std::collections::btree_map::BTreeMap;
@@ -26,7 +26,7 @@ pub struct AccountDataCache {
     // The bool flag in the `data_map` indicates whether the resource contains
     // an aggregator or snapshot.
     data_map: BTreeMap<Type, (MoveTypeLayout, GlobalValue, bool)>,
-    checksum_map: BTreeMap<Identifier, ([u8; 32], bool)>,
+    checksum_map: BTreeMap<Identifier, (Checksum, bool)>,
     module_map: BTreeMap<Identifier, (Bytes, bool)>,
 }
 
@@ -97,8 +97,8 @@ impl<'r> TransactionDataCache<'r> {
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
         loader: &Loader,
         checksum_store: &SessionCache,
-    ) -> PartialVMResult<Changes<Bytes, [u8; 32], Resource>> {
-        let mut change_set = Changes::<Bytes, [u8; 32], Resource>::new();
+    ) -> PartialVMResult<Changes<Bytes, Checksum, Resource>> {
+        let mut change_set = Changes::<Bytes, Checksum, Resource>::new();
 
         for (addr, account_data_cache) in self.account_map.into_iter() {
             let mut modules = BTreeMap::new();
@@ -264,7 +264,7 @@ impl<'r> TransactionDataCache<'r> {
         &mut self,
         module_id: &ModuleId,
         blob: Bytes,
-        checksum: [u8; 32],
+        checksum: Checksum,
         is_republishing: bool,
     ) -> VMResult<()> {
         let account_cache =
@@ -276,10 +276,9 @@ impl<'r> TransactionDataCache<'r> {
             .module_map
             .insert(module_id.name().to_owned(), (blob, is_republishing));
 
-        account_cache.checksum_map.insert(
-            module_id.name().to_owned(),
-            (checksum, is_republishing),
-        );
+        account_cache
+            .checksum_map
+            .insert(module_id.name().to_owned(), (checksum, is_republishing));
 
         Ok(())
     }

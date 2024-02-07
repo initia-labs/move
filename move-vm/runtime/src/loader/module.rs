@@ -19,7 +19,7 @@ use move_core_types::{
     language_storage::ModuleId,
     vm_status::StatusCode,
 };
-use move_vm_types::loaded_data::runtime_types::{StructIdentifier, StructType, Type};
+use move_vm_types::loaded_data::runtime_types::{Checksum, StructIdentifier, StructType, Type};
 
 use crate::native_functions::NativeFunctions;
 
@@ -37,7 +37,7 @@ use super::{
 #[derive(Clone, Debug)]
 pub(crate) struct Module {
     pub(crate) id: ModuleId,
-    pub(crate) checksum: [u8; 32],
+    pub(crate) checksum: Checksum,
 
     // primitive pools
     pub(crate) module: Arc<CompiledModule>,
@@ -52,7 +52,7 @@ pub(crate) struct Module {
     // functions as indexes into the Loader function list
     // That is effectively an indirection over the ref table:
     // the instruction carries an index into this table which contains the index into the
-    // glabal table of functions. No instantiation of generic functions is saved into
+    // global table of functions. No instantiation of generic functions is saved into
     // the global table.
     pub(crate) function_refs: Vec<FunctionHandle>,
     pub(crate) function_defs: Vec<Arc<Function>>,
@@ -144,8 +144,9 @@ impl Module {
                 };
 
                 if module_handle != module.self_handle() {
+                    let checksum = checksum_storage.load_checksum(&module_id)?;
                     module_cache
-                        .get_struct_type_by_identifier(&id, checksum_storage)?
+                        .get_struct_type_by_identifier(&checksum, &id)?
                         .check_compatibility(struct_handle)?;
                 }
 
@@ -270,11 +271,11 @@ impl Module {
                 });
             }
 
-            for func_handle in module.field_handles() {
-                let def_idx = func_handle.owner;
+            for field_handle in module.field_handles() {
+                let def_idx = field_handle.owner;
                 let definition_struct_type =
                     structs[def_idx.0 as usize].definition_struct_type.clone();
-                let offset = func_handle.field as usize;
+                let offset = field_handle.field as usize;
                 field_handles.push(FieldHandle {
                     offset,
                     definition_struct_type,
@@ -369,13 +370,12 @@ impl Module {
             .and_then(|idx| self.function_defs.get(*idx))
         {
             Some(func) => Ok(func.clone()),
-            None => {
-                Err(PartialVMError::new(StatusCode::FUNCTION_RESOLUTION_FAILURE)
-                    .with_message(format!(
-                        "Cannot find {:?}::{:?} in cache",
-                        self.id, function_name
-                    )))
-            }
+            None => Err(
+                PartialVMError::new(StatusCode::FUNCTION_RESOLUTION_FAILURE).with_message(format!(
+                    "Cannot find {:?}::{:?} in cache",
+                    self.id, function_name
+                )),
+            ),
         }
     }
 

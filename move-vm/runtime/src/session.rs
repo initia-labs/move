@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    session_cache::SessionCache, config::VMConfig, data_cache::TransactionDataCache,
-    loader::LoadedFunction, move_vm::MoveVM, native_extensions::NativeContextExtensions,
+    config::VMConfig, data_cache::TransactionDataCache, loader::LoadedFunction, move_vm::MoveVM,
+    native_extensions::NativeContextExtensions, session_cache::SessionCache,
 };
 use bytes::Bytes;
 use move_binary_format::{
@@ -24,7 +24,7 @@ use move_core_types::{
 };
 use move_vm_types::{
     gas::GasMeter,
-    loaded_data::runtime_types::{StructIdentifier, StructType, Type},
+    loaded_data::runtime_types::{Checksum, StructIdentifier, StructType, Type},
     values::{GlobalValue, Value},
 };
 use std::{borrow::Borrow, sync::Arc};
@@ -283,7 +283,7 @@ impl<'r, 'l> Session<'r, 'l> {
     pub fn finish_with_custom_effects<Resource>(
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
-    ) -> VMResult<Changes<Bytes, [u8; 32], Resource>> {
+    ) -> VMResult<Changes<Bytes, Checksum, Resource>> {
         self.data_cache
             .into_custom_effects(
                 resource_converter,
@@ -311,7 +311,7 @@ impl<'r, 'l> Session<'r, 'l> {
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
     ) -> VMResult<(
-        Changes<Bytes, [u8; 32], Resource>,
+        Changes<Bytes, Checksum, Resource>,
         NativeContextExtensions<'r>,
     )> {
         let Session {
@@ -331,11 +331,7 @@ impl<'r, 'l> Session<'r, 'l> {
 
     pub fn finish_with_extensions_with_session_cache(
         self,
-    ) -> VMResult<(
-        ChangeSet,
-        SessionCache<'r>,
-        NativeContextExtensions<'r>,
-    )> {
+    ) -> VMResult<(ChangeSet, SessionCache<'r>, NativeContextExtensions<'r>)> {
         let Session {
             data_cache,
             session_cache,

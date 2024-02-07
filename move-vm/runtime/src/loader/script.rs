@@ -7,13 +7,13 @@ use move_binary_format::{
     file_format::{Bytecode, CompiledScript, FunctionDefinitionIndex, Signature, SignatureIndex},
 };
 use move_core_types::{identifier::Identifier, language_storage::ModuleId, vm_status::StatusCode};
-use move_vm_types::loaded_data::runtime_types::{StructIdentifier, Type};
+use move_vm_types::loaded_data::runtime_types::{Checksum, StructIdentifier, Type};
 
 use super::{
     cache::ModuleCache,
     function::{Function, FunctionHandle, FunctionInstantiation, Scope},
     type_loader::intern_type,
-    Checksum, ChecksumStorage,
+    ChecksumStorage,
 };
 
 // A Script is very similar to a `CompiledScript` but data is "transformed" to a representation
@@ -58,12 +58,13 @@ impl Script {
             let module_id = script.module_id_for_handle(module_handle);
 
             let id = StructIdentifier {
-                module_id,
+                module_id: module_id.clone(),
                 name: struct_name.to_owned(),
             };
 
+            let checksum = checksum_storage.load_checksum(&module_id)?;
             module_cache
-                .get_struct_type_by_identifier(&id, checksum_storage)?
+                .get_struct_type_by_identifier(&checksum, &id)?
                 .check_compatibility(struct_handle)?;
 
             struct_names.push(id);

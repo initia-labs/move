@@ -13,5 +13,3 @@ pub(crate) use store::{ChecksumStorage, ChecksumStorageForVerify, ModuleStorage}
 
 pub use function::LoadedFunction;
 pub use loader_impl::Loader;
-
-use move_vm_types::loaded_data::runtime_types::Checksum;
