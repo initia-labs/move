@@ -1144,16 +1144,12 @@ impl Value {
     }
 
     // API is not checking the value layout, so the caller need to be careful.
-    pub fn json_value(ty: u8, val: String) -> Self {
+    pub fn json_array_value(ty: u8, val: String) -> Self {
         Value::struct_(Struct::pack(vec![Value::u8(ty), Value::string(val)]))
     }
 
-    // API is not checking the value layout, so the caller need to be careful.
-    pub fn json_elem(key: String, ty: u8, val: String) -> Self {
-        Value::struct_(Struct::pack(vec![
-            Value::string(key),
-            Value::json_value(ty, val),
-        ]))
+    pub fn json_object_value(ty: u8, key: String, val: String) -> Self {
+        Value::struct_(Struct::pack(vec![Value::u8(ty), Value::string(key), Value::string(val)]))
     }
 
     // TODO: consider whether we want to replace these with fn vector(v: Vec<Value>).
@@ -1206,19 +1202,19 @@ impl Value {
     }
 
     // API is not checking the value layout, so the caller need to be careful.
-    pub fn vector_json_value(ty: u8, it: impl IntoIterator<Item = String>) -> Self {
-        let values: Vec<Value> = it.into_iter().map(|v| Value::json_value(ty, v)).collect();
-
+    pub fn vector_json_array_value(it: impl IntoIterator<Item = (u8, String)>) -> Self {
         Self(ValueImpl::Container(Container::Vec(Rc::new(RefCell::new(
-            values.into_iter().map(|v| v.0).collect(),
+            it.into_iter()
+                .map(|(ty, v)| Value::json_array_value(ty, v).0)
+                .collect(),
         )))))
     }
 
     // API is not checking the value layout, so the caller need to be careful.
-    pub fn vector_json_elem(it: impl IntoIterator<Item = (String, u8, String)>) -> Self {
+    pub fn vector_json_object_value(it: impl IntoIterator<Item = (u8, String, String)>) -> Self {
         Self(ValueImpl::Container(Container::Vec(Rc::new(RefCell::new(
             it.into_iter()
-                .map(|(k, ty, v)| Value::json_elem(k, ty, v).0)
+                .map(|(ty, k, v)| Value::json_object_value(ty, k, v).0)
                 .collect(),
         )))))
     }
