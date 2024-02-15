@@ -745,7 +745,7 @@ impl Interpreter {
     //
 
     /// Given an `VMStatus` generate a core dump if the error is an `InvariantViolation`.
-    fn maybe_core_dump(&self, mut err: VMError, current_frame: &Frame) -> VMError {
+    fn maybe_core_dump(&self, mut err: VMError, _current_frame: &Frame) -> VMError {
         // a verification error cannot happen at runtime so change it into an invariant violation.
         if err.status_type() == StatusType::Verification {
             let new_err = PartialVMError::new(StatusCode::VERIFICATION_ERROR);
@@ -868,6 +868,7 @@ impl Interpreter {
     /// It is used when generating a core dump but can be used for debugging of the interpreter.
     /// It will be exposed via a debug module to give developers a way to print the internals
     /// of an execution.
+    #[allow(dead_code)]
     fn internal_state_str(&self, current_frame: &Frame) -> String {
         let mut internal_state = "Call stack:\n".to_string();
         for (i, frame) in self.call_stack.0.iter().enumerate() {
