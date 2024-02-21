@@ -3,12 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    config::VMConfig,
     data_cache::TransactionDataCache,
     interpreter::Interpreter,
     loader::{ChecksumStorageForVerify, Function, LoadedFunction, Loader},
     native_extensions::NativeContextExtensions,
-    native_functions::{NativeFunction, NativeFunctions},
     session::{LoadedFunctionInstantiation, SerializedReturnValues},
     session_cache::SessionCache,
 };
@@ -23,7 +21,7 @@ use move_binary_format::{
 use move_bytecode_verifier::script_signature;
 use move_core_types::{
     account_address::AccountAddress,
-    identifier::{IdentStr, Identifier},
+    identifier::{IdentStr},
     language_storage::{ModuleId, TypeTag},
     value::MoveTypeLayout,
     vm_status::StatusCode,
@@ -41,18 +39,19 @@ use std::{
 };
 
 /// An instantiation of the MoveVM.
-pub(crate) struct VMRuntime {
-    pub(crate) loader: Loader,
-}
+pub(crate) struct VMRuntime {}
 
 impl VMRuntime {
-    pub(crate) fn new(
-        natives: impl IntoIterator<Item = (AccountAddress, Identifier, Identifier, NativeFunction)>,
-        vm_config: VMConfig,
-    ) -> PartialVMResult<Self> {
-        Ok(VMRuntime {
-            loader: Loader::new(NativeFunctions::new(natives)?, vm_config),
-        })
+    // pub(crate) fn new(
+    //     natives: impl IntoIterator<Item = (AccountAddress, Identifier, Identifier, NativeFunction)>,
+    //     vm_config: VMConfig,
+    // ) -> PartialVMResult<Self> {
+    //     Ok(VMRuntime {
+    //         loader: Loader::new(NativeFunctions::new(natives)?, vm_config),
+    //     })
+    // }
+    pub(crate) fn default() -> Self {
+        Self {}
     }
 
     #[allow(clippy::too_many_arguments)]

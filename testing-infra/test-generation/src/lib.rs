@@ -40,6 +40,7 @@ use move_core_types::{
     vm_status::{StatusCode, VMStatus},
 };
 use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{loader::Loader, native_functions::NativeFunctions, config::VMConfig};
 use move_vm_test_utils::{DeltaStorage, InMemoryStorage};
 use move_vm_types::gas::UnmeteredGasMeter;
 use once_cell::sync::Lazy;
@@ -142,11 +143,11 @@ fn execute_function_in_module(
         module.identifier_at(entry_name_idx)
     };
     {
-        let vm = MoveVM::new(move_stdlib::natives::all_natives(
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
             AccountAddress::from_hex_literal("0x1").unwrap(),
             move_stdlib::natives::GasParameters::zeros(),
-        ))
-        .unwrap();
+        )).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
 
         let mut changeset = ChangeSet::new();
         let mut blob = vec![];
@@ -158,6 +159,7 @@ fn execute_function_in_module(
         let mut sess = vm.new_session(&delta_storage);
 
         sess.execute_function_bypass_visibility(
+            &loader,
             &module_id,
             entry_name,
             ty_args,

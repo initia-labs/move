@@ -22,6 +22,7 @@ use move_core_types::{
     vm_status::{StatusCode, StatusType},
 };
 use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{loader::Loader, config::VMConfig, native_functions::NativeFunctions};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas::UnmeteredGasMeter;
 
@@ -247,11 +248,13 @@ fn call_script_with_args_ty_args_signers(
     ty_args: Vec<TypeTag>,
     signers: Vec<AccountAddress>,
 ) -> VMResult<()> {
-    let move_vm = MoveVM::new(vec![]).unwrap();
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let move_vm = MoveVM::default();
     let remote_view = InMemoryStorage::new();
     let mut session = move_vm.new_session(&remote_view);
     session
         .execute_script(
+            &loader,
             script,
             ty_args,
             combine_signers_and_args(signers, non_signer_args),
@@ -271,7 +274,8 @@ fn call_script_function_with_args_ty_args_signers(
     ty_args: Vec<TypeTag>,
     signers: Vec<AccountAddress>,
 ) -> VMResult<()> {
-    let move_vm = MoveVM::new(vec![]).unwrap();
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let move_vm = MoveVM::default();
     let mut remote_view = InMemoryStorage::new();
 
     let module_id = module.self_id();
@@ -281,6 +285,7 @@ fn call_script_function_with_args_ty_args_signers(
     remote_view.publish_or_overwrite_module(module_id.clone(), module_blob);
     let mut session = move_vm.new_session(&remote_view);
     session.execute_function_bypass_visibility(
+        &loader,
         &module_id,
         function_name.as_ident_str(),
         ty_args,
@@ -771,11 +776,13 @@ fn call_missing_item() {
 
     // missing module
     let function_name = ident_str!("foo");
-    let move_vm = MoveVM::new(vec![]).unwrap();
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let move_vm = MoveVM::default();
     let mut remote_view = InMemoryStorage::new();
     let mut session = move_vm.new_session(&remote_view);
     let error = session
         .execute_function_bypass_visibility(
+            &loader,
             &module_id,
             function_name,
             vec![],
@@ -798,6 +805,7 @@ fn call_missing_item() {
     let mut session = move_vm.new_session(&remote_view);
     let error = session
         .execute_function_bypass_visibility(
+            &loader,
             &module_id,
             function_name,
             vec![],

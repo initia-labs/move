@@ -22,8 +22,11 @@ use move_core_types::{
 };
 use move_resource_viewer::MoveValueAnnotator;
 use move_vm_runtime::{
-    move_vm::MoveVM, native_extensions::NativeContextExtensions,
-    native_functions::NativeFunctionTable,
+    config::VMConfig,
+    loader::Loader,
+    move_vm::MoveVM,
+    native_extensions::NativeContextExtensions,
+    native_functions::{NativeFunctionTable, NativeFunctions},
 };
 use move_vm_test_utils::{
     gas_schedule::{zero_cost_schedule, CostTable, Gas, GasCost, GasStatus},
@@ -259,7 +262,9 @@ impl SharedTestingConfig {
         VMResult<Vec<Vec<u8>>>,
         TestRunInfo,
     ) {
-        let move_vm = MoveVM::new(self.native_function_table.clone()).unwrap();
+        let native_functions = NativeFunctions::new(self.native_function_table.clone()).unwrap();
+        let loader = Loader::new(native_functions, VMConfig::default());
+        let move_vm = MoveVM::default();
         let extensions = extensions::new_extensions();
         let mut session =
             move_vm.new_session_with_extensions(&self.starting_storage_state, extensions);
@@ -268,6 +273,7 @@ impl SharedTestingConfig {
 
         let now = Instant::now();
         let serialized_return_values_result = session.execute_function_bypass_visibility(
+            &loader,
             &test_plan.module_id,
             IdentStr::new(function_name).unwrap(),
             vec![], // no ty args, at least for now
@@ -295,7 +301,7 @@ impl SharedTestingConfig {
                 .unwrap()
                 .into(),
         );
-        match session.finish_with_extensions() {
+        match session.finish_with_extensions(&loader) {
             Ok((cs, extensions)) => (Ok(cs), Ok(extensions), return_result, test_run_info),
             Err(err) => (Err(err.clone()), Err(err), return_result, test_run_info),
         }

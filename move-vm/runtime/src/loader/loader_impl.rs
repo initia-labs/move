@@ -60,7 +60,7 @@ pub struct Loader {
 }
 
 impl Loader {
-    pub(crate) fn new(natives: NativeFunctions, vm_config: VMConfig) -> Self {
+    pub fn new(natives: NativeFunctions, vm_config: VMConfig) -> Self {
         Self {
             module_cache: RwLock::new(ModuleCache::new()),
             script_cache: RwLock::new(ScriptCache::new()),

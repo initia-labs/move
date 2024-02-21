@@ -11,6 +11,7 @@ use move_core_types::{
     value::{MoveTypeLayout, MoveValue},
 };
 use move_vm_runtime::{move_vm::MoveVM, session::SerializedReturnValues};
+use move_vm_runtime::{loader::Loader, config::VMConfig, native_functions::NativeFunctions};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas::UnmeteredGasMeter;
 
@@ -50,7 +51,8 @@ fn run(
     let module_id = ModuleId::new(TEST_ADDR, Identifier::new("M").unwrap());
     storage.publish_or_overwrite_module(module_id.clone(), blob);
 
-    let vm = MoveVM::new(vec![]).unwrap();
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let vm = MoveVM::default();
     let mut sess = vm.new_session(&storage);
 
     let fun_name = Identifier::new("foo").unwrap();
@@ -64,6 +66,7 @@ fn run(
         return_values,
         mutable_reference_outputs: _,
     } = sess.execute_function_bypass_visibility(
+        &loader,
         &module_id,
         &fun_name,
         ty_args,

@@ -36,6 +36,8 @@ use move_vm_runtime::{
     config::VMConfig,
     move_vm::MoveVM,
     session::{SerializedReturnValues, Session},
+    loader::Loader,
+    native_functions::NativeFunctions,
 };
 use move_vm_test_utils::{gas_schedule::GasStatus, InMemoryStorage};
 use once_cell::sync::Lazy;
@@ -165,7 +167,7 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
         adapter
             .perform_session_action(
                 None,
-                |session, gas_status| {
+                |session, loader, gas_status| {
                     for module in &*MOVE_STDLIB_COMPILED {
                         let mut module_bytes = vec![];
                         module.serialize(&mut module_bytes).unwrap();
@@ -173,7 +175,7 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
                         let id = module.self_id();
                         let sender = *id.address();
                         session
-                            .publish_module(module_bytes, sender, gas_status)
+                            .publish_module(module_bytes, sender, loader, gas_status)
                             .unwrap();
                     }
                     Ok(())
@@ -213,7 +215,7 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
         let verbose = extra_args.verbose;
         match self.perform_session_action(
             gas_budget,
-            |session, gas_status| {
+            |session, loader, gas_status| {
                 let compat = Compatibility::new(
                     !extra_args.skip_check_struct_and_pub_function_linking,
                     !extra_args.skip_check_struct_layout,
@@ -223,6 +225,7 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
                 session.publish_module_bundle_with_compat_config(
                     vec![module_bytes],
                     sender,
+                    loader,
                     gas_status,
                     compat,
                 )
@@ -272,8 +275,8 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
         let serialized_return_values = self
             .perform_session_action(
                 gas_budget,
-                |session, gas_status| {
-                    session.execute_script(script_bytes, type_args, args, gas_status)
+                |session, loader, gas_status| {
+                    session.execute_script(script_bytes, type_args, args, loader, gas_status)
                 },
                 VMConfig::from(extra_args),
             )
@@ -318,9 +321,9 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
         let serialized_return_values = self
             .perform_session_action(
                 gas_budget,
-                |session, gas_status| {
+                |session, loader, gas_status| {
                     session.execute_function_bypass_visibility(
-                        module, function, type_args, args, gas_status,
+                        module, function, type_args, args, loader, gas_status,
                     )
                 },
                 VMConfig::from(extra_args),
@@ -356,19 +359,17 @@ impl<'a> SimpleVMTestAdapter<'a> {
     fn perform_session_action<Ret>(
         &mut self,
         gas_budget: Option<u64>,
-        f: impl FnOnce(&mut Session, &mut GasStatus) -> VMResult<Ret>,
+        f: impl FnOnce(&mut Session, &Loader, &mut GasStatus) -> VMResult<Ret>,
         vm_config: VMConfig,
     ) -> VMResult<Ret> {
         // start session
-        let vm = MoveVM::new_with_config(
-            move_stdlib::natives::all_natives(
-                STD_ADDR,
-                // TODO: come up with a suitable gas schedule
-                move_stdlib::natives::GasParameters::zeros(),
-            ),
-            vm_config,
-        )
-        .unwrap();
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
+            STD_ADDR,
+            // TODO: come up with a suitable gas schedule
+            move_stdlib::natives::GasParameters::zeros(),
+        )).unwrap(), vm_config);
+        let vm = MoveVM::default();
+
         let (mut session, mut gas_status) = {
             let gas_status = move_cli::sandbox::utils::get_gas_status(
                 &move_vm_test_utils::gas_schedule::INITIAL_COST_SCHEDULE,
@@ -380,10 +381,10 @@ impl<'a> SimpleVMTestAdapter<'a> {
         };
 
         // perform op
-        let res = f(&mut session, &mut gas_status)?;
+        let res = f(&mut session, &loader, &mut gas_status)?;
 
         // save changeset
-        let changeset = session.finish()?;
+        let changeset = session.finish(&loader)?;
         self.storage.apply(changeset).unwrap();
         Ok(res)
     }

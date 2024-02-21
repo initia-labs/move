@@ -10,7 +10,7 @@ use move_core_types::{
     value::{serialize_values, MoveValue},
     vm_status::StatusType,
 };
-use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{move_vm::MoveVM, loader::Loader, config::VMConfig, native_functions::NativeFunctions};
 use move_vm_test_utils::{BlankStorage, InMemoryStorage};
 use move_vm_types::gas::UnmeteredGasMeter;
 
@@ -18,7 +18,8 @@ const TEST_ADDR: AccountAddress = AccountAddress::new([42; AccountAddress::LENGT
 
 #[test]
 fn call_non_existent_module() {
-    let vm = MoveVM::new(vec![]).unwrap();
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let vm = MoveVM::default();
     let storage = BlankStorage;
 
     let mut sess = vm.new_session(&storage);
@@ -27,6 +28,7 @@ fn call_non_existent_module() {
 
     let err = sess
         .execute_function_bypass_visibility(
+            &loader,
             &module_id,
             &fun_name,
             vec![],
@@ -54,13 +56,15 @@ fn call_non_existent_function() {
     let module_id = ModuleId::new(TEST_ADDR, Identifier::new("M").unwrap());
     storage.publish_or_overwrite_module(module_id.clone(), blob);
 
-    let vm = MoveVM::new(vec![]).unwrap();
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let vm = MoveVM::default();
     let mut sess = vm.new_session(&storage);
 
     let fun_name = Identifier::new("foo").unwrap();
 
     let err = sess
         .execute_function_bypass_visibility(
+            &loader,
             &module_id,
             &fun_name,
             vec![],

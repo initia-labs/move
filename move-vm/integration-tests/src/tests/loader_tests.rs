@@ -17,6 +17,7 @@ use move_core_types::{
     language_storage::ModuleId,
 };
 use move_vm_runtime::{config::VMConfig, move_vm::MoveVM};
+use move_vm_runtime::{loader::Loader, native_functions::NativeFunctions};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas::UnmeteredGasMeter;
 use std::{path::PathBuf, sync::Arc, thread};
@@ -25,6 +26,7 @@ const WORKING_ACCOUNT: AccountAddress = AccountAddress::TWO;
 
 struct Adapter {
     store: InMemoryStorage,
+    loader: Arc<Loader>,
     vm: Arc<MoveVM>,
     functions: Vec<(ModuleId, Identifier)>,
 }
@@ -60,9 +62,13 @@ impl Adapter {
             },
             ..Default::default()
         };
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), config);
+        let vm = MoveVM::default();
+
         Self {
             store,
-            vm: Arc::new(MoveVM::new_with_config(vec![], config).unwrap()),
+            loader: Arc::new(loader),
+            vm: Arc::new(vm),
             functions,
         }
     }
@@ -75,9 +81,12 @@ impl Adapter {
             },
             ..Default::default()
         };
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), config);
+        let vm = MoveVM::default();
         Self {
             store: self.store,
-            vm: Arc::new(MoveVM::new_with_config(vec![], config).unwrap()),
+            loader: Arc::new(loader),
+            vm: Arc::new(vm),
             functions: self.functions,
         }
     }
@@ -91,10 +100,10 @@ impl Adapter {
                 .serialize(&mut binary)
                 .unwrap_or_else(|_| panic!("failure in module serialization: {:#?}", module));
             session
-                .publish_module(binary, WORKING_ACCOUNT, &mut UnmeteredGasMeter)
+                .publish_module(&self.loader, binary, WORKING_ACCOUNT, &mut UnmeteredGasMeter)
                 .unwrap_or_else(|_| panic!("failure publishing module: {:#?}", module));
         }
-        let changeset = session.finish().expect("failure getting write set");
+        let changeset = session.finish(&self.loader).expect("failure getting write set");
         self.store
             .apply(changeset)
             .expect("failure applying write set");
@@ -109,7 +118,7 @@ impl Adapter {
                 .serialize(&mut binary)
                 .unwrap_or_else(|_| panic!("failure in module serialization: {:#?}", module));
             session
-                .publish_module(binary, WORKING_ACCOUNT, &mut UnmeteredGasMeter)
+                .publish_module(&self.loader, binary, WORKING_ACCOUNT, &mut UnmeteredGasMeter)
                 .expect_err("publishing must fail");
         }
     }
@@ -126,10 +135,12 @@ impl Adapter {
             for (module_id, name) in self.functions.clone() {
                 let vm = self.vm.clone();
                 let data_store = self.store.clone();
+                let loader = self.loader.clone();
                 children.push(thread::spawn(move || {
                     let mut session = vm.new_session(&data_store);
                     session
                         .execute_function_bypass_visibility(
+                            &loader,
                             &module_id,
                             &name,
                             vec![],
@@ -151,6 +162,7 @@ impl Adapter {
         let mut session = self.vm.new_session(&self.store);
         session
             .execute_function_bypass_visibility(
+                &self.loader,
                 module,
                 name,
                 vec![],
@@ -228,7 +240,7 @@ fn load_phantom_module() {
     adapter
         .vm
         .new_session(&adapter.store)
-        .load_module(&module_id)
+        .load_module(&adapter.loader, &module_id)
         .unwrap();
 }
 
@@ -266,7 +278,7 @@ fn load_with_extra_ability() {
     adapter
         .vm
         .new_session(&adapter.store)
-        .load_module(&module_id)
+        .load_module(&adapter.loader, &module_id)
         .unwrap();
 }
 

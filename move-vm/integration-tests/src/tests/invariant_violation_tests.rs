@@ -7,6 +7,7 @@ use move_binary_format::file_format::{
 };
 use move_core_types::vm_status::StatusCode;
 use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{loader::Loader, config::VMConfig, native_functions::NativeFunctions};
 use move_vm_test_utils::{gas_schedule::GasStatus, InMemoryStorage};
 
 #[test]
@@ -70,7 +71,8 @@ fn merge_borrow_states_infinite_loop() {
     };
 
     move_bytecode_verifier::verify_script(&cs).expect("verify failed");
-    let vm = MoveVM::new(vec![]).unwrap();
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let vm = MoveVM::default();
 
     let storage: InMemoryStorage = InMemoryStorage::new();
     let mut session = vm.new_session(&storage);
@@ -79,6 +81,7 @@ fn merge_borrow_states_infinite_loop() {
 
     let err = session
         .execute_script(
+            &loader,
             script_bytes.as_slice(),
             vec![],
             Vec::<Vec<u8>>::new(),

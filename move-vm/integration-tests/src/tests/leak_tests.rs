@@ -5,6 +5,7 @@ use move_binary_format::file_format::{
     Bytecode::*, CodeUnit, CompiledScript, Signature, SignatureIndex, SignatureToken::*,
 };
 use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{loader::Loader, config::VMConfig, native_functions::NativeFunctions};
 use move_vm_test_utils::{gas_schedule::GasStatus, InMemoryStorage};
 
 #[ignore] // TODO: figure whether to reactive this test
@@ -45,7 +46,8 @@ fn leak_with_abort() {
     };
 
     move_bytecode_verifier::verify_script(&cs).expect("verify failed");
-    let vm = MoveVM::new(vec![]).unwrap();
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let vm = MoveVM::default();
 
     let storage: InMemoryStorage = InMemoryStorage::new();
     let mut session = vm.new_session(&storage);
@@ -54,6 +56,7 @@ fn leak_with_abort() {
 
     for _ in 0..100_000 {
         let _ = session.execute_script(
+            &loader,
             script_bytes.as_slice(),
             vec![],
             Vec::<Vec<u8>>::new(),

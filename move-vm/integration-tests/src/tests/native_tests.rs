@@ -8,6 +8,7 @@ use move_core_types::{
     account_address::AccountAddress, gas_algebra::InternalGas, identifier::Identifier,
 };
 use move_vm_runtime::{config::VMConfig, move_vm::MoveVM, native_functions::NativeFunction};
+use move_vm_runtime::{loader::Loader, native_functions::NativeFunctions};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::{gas::UnmeteredGasMeter, natives::function::NativeResult};
 use std::sync::Arc;
@@ -55,27 +56,27 @@ fn test_publish_module_with_nested_loops() {
     {
         let storage = InMemoryStorage::new();
 
-        let natives = vec![(
+        let loader = Loader::new(NativeFunctions::new(vec![(
             TEST_ADDR,
             Identifier::new("M").unwrap(),
             Identifier::new("bar").unwrap(),
             make_failed_native(),
-        )];
-        let vm = MoveVM::new_with_config(natives, VMConfig {
+        )]).unwrap(), VMConfig {
             verifier: VerifierConfig {
                 max_loop_depth: Some(2),
                 ..Default::default()
             },
             ..Default::default()
-        })
-        .unwrap();
+        });
+        let vm = MoveVM::default();
 
         let mut sess = vm.new_session(&storage);
-        sess.publish_module(m_blob.clone(), TEST_ADDR, &mut UnmeteredGasMeter)
+        sess.publish_module(&loader, m_blob.clone(), TEST_ADDR, &mut UnmeteredGasMeter)
             .unwrap();
 
         let err1 = sess
             .execute_entry_function(
+                &loader,
                 &m.self_id(),
                 &Identifier::new("foo").unwrap(),
                 vec![],
@@ -88,6 +89,7 @@ fn test_publish_module_with_nested_loops() {
 
         let err2 = sess
             .execute_entry_function(
+                &loader,
                 &m.self_id(),
                 &Identifier::new("foo2").unwrap(),
                 vec![],

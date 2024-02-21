@@ -21,7 +21,9 @@ use move_core_types::{
     value::MoveValue,
 };
 use move_package::compilation::compiled_package::CompiledPackage;
-use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{
+    config::VMConfig, loader::Loader, move_vm::MoveVM, native_functions::NativeFunctions,
+};
 use move_vm_test_utils::gas_schedule::CostTable;
 use std::{fs, path::Path};
 
@@ -76,7 +78,9 @@ move run` must be applied to a module inside `storage/`",
     // TODO: parse Value's directly instead of going through the indirection of TransactionArgument?
     let vm_args: Vec<Vec<u8>> = convert_txn_args(txn_args);
 
-    let vm = MoveVM::new(natives).unwrap();
+    let loader = Loader::new(NativeFunctions::new(natives).unwrap(), VMConfig::default());
+    let vm = MoveVM::default();
+    // let vm = MoveVM::new(natives).unwrap();
     let mut gas_status = get_gas_status(cost_table, gas_budget)?;
     let mut session = vm.new_session(state);
 
@@ -98,14 +102,16 @@ move run` must be applied to a module inside `storage/`",
             let module = CompiledModule::deserialize(&bytecode)
                 .map_err(|e| anyhow!("Error deserializing module: {:?}", e))?;
             session.execute_entry_function(
+                &loader,
                 &module.self_id(),
                 IdentStr::new(script_name)?,
                 vm_type_args.clone(),
                 vm_args,
                 &mut gas_status,
             )
-        },
+        }
         None => session.execute_script(
+            &loader,
             bytecode.to_vec(),
             vm_type_args.clone(),
             vm_args,
@@ -125,7 +131,7 @@ move run` must be applied to a module inside `storage/`",
             txn_args,
         )
     } else {
-        let changeset = session.finish().map_err(|e| e.into_vm_status())?;
+        let changeset = session.finish(&loader).map_err(|e| e.into_vm_status())?;
         if verbose {
             explain_execution_effects(&changeset, state)?
         }

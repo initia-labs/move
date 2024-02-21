@@ -10,6 +10,7 @@ use move_core_types::{
     value::{serialize_values, MoveValue},
 };
 use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{loader::Loader, config::VMConfig, native_functions::NativeFunctions};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas::UnmeteredGasMeter;
 
@@ -43,7 +44,8 @@ fn mutated_accounts() {
     let module_id = ModuleId::new(TEST_ADDR, Identifier::new("M").unwrap());
     storage.publish_or_overwrite_module(module_id.clone(), blob);
 
-    let vm = MoveVM::new(vec![]).unwrap();
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let vm = MoveVM::default();
     let mut sess = vm.new_session(&storage);
 
     let publish = Identifier::new("publish").unwrap();
@@ -53,6 +55,7 @@ fn mutated_accounts() {
     let account1 = AccountAddress::random();
 
     sess.execute_function_bypass_visibility(
+        &loader,
         &module_id,
         &publish,
         vec![],
@@ -67,6 +70,7 @@ fn mutated_accounts() {
     assert_eq!(sess.num_mutated_accounts(&TEST_ADDR), 2);
 
     sess.execute_function_bypass_visibility(
+        &loader,
         &module_id,
         &get,
         vec![],
@@ -78,6 +82,7 @@ fn mutated_accounts() {
     assert_eq!(sess.num_mutated_accounts(&TEST_ADDR), 2);
 
     sess.execute_function_bypass_visibility(
+        &loader,
         &module_id,
         &flip,
         vec![],
@@ -87,11 +92,12 @@ fn mutated_accounts() {
     .unwrap();
     assert_eq!(sess.num_mutated_accounts(&TEST_ADDR), 2);
 
-    let changes = sess.finish().unwrap();
+    let changes = sess.finish(&loader).unwrap();
     storage.apply(changes).unwrap();
 
     let mut sess = vm.new_session(&storage);
     sess.execute_function_bypass_visibility(
+        &loader,
         &module_id,
         &get,
         vec![],

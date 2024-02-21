@@ -14,6 +14,7 @@ use move_core_types::{
     vm_status::StatusCode,
 };
 use move_vm_runtime::{move_vm::MoveVM, session::SerializedReturnValues};
+use move_vm_runtime::{loader::Loader, config::VMConfig, native_functions::NativeFunctions};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas::UnmeteredGasMeter;
 use std::convert::TryInto;
@@ -92,13 +93,14 @@ fn run(
 ) -> VMResult<(ChangeSet, SerializedReturnValues)> {
     let module_id = &module.0;
     let modules = vec![module.clone()];
-    let (vm, storage) = setup_vm(&modules);
+    let (vm, loader, storage) = setup_vm(&modules);
     let mut session = vm.new_session(&storage);
 
     let fun_name = Identifier::new(fun_name).unwrap();
 
     session
         .execute_function_bypass_visibility(
+            &loader,
             module_id,
             &fun_name,
             vec![],
@@ -106,7 +108,7 @@ fn run(
             &mut UnmeteredGasMeter,
         )
         .and_then(|ret_values| {
-            let change_set = session.finish()?;
+            let change_set = session.finish(&loader,)?;
             Ok((change_set, ret_values))
         })
 }
@@ -114,10 +116,13 @@ fn run(
 type ModuleCode = (ModuleId, String);
 
 // TODO - move some utility functions to where test infra lives, see about unifying with similar code
-fn setup_vm(modules: &[ModuleCode]) -> (MoveVM, InMemoryStorage) {
+fn setup_vm(modules: &[ModuleCode]) -> (MoveVM, Loader, InMemoryStorage) {
     let mut storage = InMemoryStorage::new();
     compile_modules(&mut storage, modules);
-    (MoveVM::new(vec![]).unwrap(), storage)
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let vm = MoveVM::default();
+
+    (vm, loader, storage)
 }
 
 fn compile_modules(storage: &mut InMemoryStorage, modules: &[ModuleCode]) {

@@ -8,6 +8,7 @@ use move_binary_format::{
 };
 use move_core_types::{account_address::AccountAddress, vm_status::StatusCode};
 use move_vm_runtime::{config::VMConfig, move_vm::MoveVM};
+use move_vm_runtime::{loader::Loader, native_functions::NativeFunctions};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas::UnmeteredGasMeter;
 
@@ -24,14 +25,16 @@ fn test_publish_module_with_custom_max_binary_format_version() {
     // Should accept both modules with the default settings
     {
         let storage = InMemoryStorage::new();
-        let vm = MoveVM::new(move_stdlib::natives::all_natives(
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
             AccountAddress::from_hex_literal("0x1").unwrap(),
             move_stdlib::natives::GasParameters::zeros(),
-        ))
-        .unwrap();
+        )).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
+        
         let mut sess = vm.new_session(&storage);
 
         sess.publish_module(
+            &loader,
             b_new.clone(),
             *m.self_id().address(),
             &mut UnmeteredGasMeter,
@@ -39,6 +42,7 @@ fn test_publish_module_with_custom_max_binary_format_version() {
         .unwrap();
 
         sess.publish_module(
+            &loader,
             b_old.clone(),
             *m.self_id().address(),
             &mut UnmeteredGasMeter,
@@ -49,24 +53,23 @@ fn test_publish_module_with_custom_max_binary_format_version() {
     // Should reject the module with newer version with max binary format version being set to VERSION_MAX - 1
     {
         let storage = InMemoryStorage::new();
-        let vm = MoveVM::new_with_config(
-            move_stdlib::natives::all_natives(
-                AccountAddress::from_hex_literal("0x1").unwrap(),
-                move_stdlib::natives::GasParameters::zeros(),
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
+            AccountAddress::from_hex_literal("0x1").unwrap(),
+            move_stdlib::natives::GasParameters::zeros(),
+        )).unwrap(), VMConfig {
+            deserializer_config: DeserializerConfig::new(
+                VERSION_MAX.checked_sub(1).unwrap(),
+                IDENTIFIER_SIZE_MAX,
             ),
-            VMConfig {
-                deserializer_config: DeserializerConfig::new(
-                    VERSION_MAX.checked_sub(1).unwrap(),
-                    IDENTIFIER_SIZE_MAX,
-                ),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+            ..Default::default()
+        });
+        let vm = MoveVM::default();
+
         let mut sess = vm.new_session(&storage);
 
         assert_eq!(
             sess.publish_module(
+                &loader,
                 b_new.clone(),
                 *m.self_id().address(),
                 &mut UnmeteredGasMeter,
@@ -77,6 +80,7 @@ fn test_publish_module_with_custom_max_binary_format_version() {
         );
 
         sess.publish_module(
+            &loader,
             b_old.clone(),
             *m.self_id().address(),
             &mut UnmeteredGasMeter,
@@ -98,49 +102,48 @@ fn test_run_script_with_custom_max_binary_format_version() {
     // Should accept both modules with the default settings
     {
         let storage = InMemoryStorage::new();
-        let vm = MoveVM::new(move_stdlib::natives::all_natives(
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
             AccountAddress::from_hex_literal("0x1").unwrap(),
             move_stdlib::natives::GasParameters::zeros(),
-        ))
-        .unwrap();
+        )).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
 
         let args: Vec<Vec<u8>> = vec![];
-        sess.execute_script(b_new.clone(), vec![], args.clone(), &mut UnmeteredGasMeter)
+        sess.execute_script(&loader, b_new.clone(), vec![], args.clone(), &mut UnmeteredGasMeter)
             .unwrap();
 
-        sess.execute_script(b_old.clone(), vec![], args, &mut UnmeteredGasMeter)
+        sess.execute_script(&loader, b_old.clone(), vec![], args, &mut UnmeteredGasMeter)
             .unwrap();
     }
 
     // Should reject the module with newer version with max binary format version being set to VERSION_MAX - 1
     {
         let storage = InMemoryStorage::new();
-        let vm = MoveVM::new_with_config(
-            move_stdlib::natives::all_natives(
-                AccountAddress::from_hex_literal("0x1").unwrap(),
-                move_stdlib::natives::GasParameters::zeros(),
+
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
+            AccountAddress::from_hex_literal("0x1").unwrap(),
+            move_stdlib::natives::GasParameters::zeros(),
+        )).unwrap(), VMConfig {
+            deserializer_config: DeserializerConfig::new(
+                VERSION_MAX.checked_sub(1).unwrap(),
+                IDENTIFIER_SIZE_MAX,
             ),
-            VMConfig {
-                deserializer_config: DeserializerConfig::new(
-                    VERSION_MAX.checked_sub(1).unwrap(),
-                    IDENTIFIER_SIZE_MAX,
-                ),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+            ..Default::default()
+        });
+        let vm = MoveVM::default();
+        
         let mut sess = vm.new_session(&storage);
 
         let args: Vec<Vec<u8>> = vec![];
         assert_eq!(
-            sess.execute_script(b_new.clone(), vec![], args.clone(), &mut UnmeteredGasMeter)
+            sess.execute_script(&loader, b_new.clone(), vec![], args.clone(),&mut UnmeteredGasMeter)
                 .unwrap_err()
                 .major_status(),
             StatusCode::CODE_DESERIALIZATION_ERROR
         );
 
-        sess.execute_script(b_old.clone(), vec![], args, &mut UnmeteredGasMeter)
+        sess.execute_script(&loader, b_old.clone(), vec![], args, &mut UnmeteredGasMeter)
             .unwrap();
     }
 }

@@ -16,6 +16,7 @@ use move_core_types::{
     vm_status::StatusCode,
 };
 use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{loader::Loader, config::VMConfig, native_functions::NativeFunctions};
 use move_vm_test_utils::{gas_schedule::GasStatus, InMemoryStorage};
 
 #[test]
@@ -100,7 +101,8 @@ fn instantiation_err() {
     };
 
     move_bytecode_verifier::verify_module(&cm).expect("verify failed");
-    let vm = MoveVM::new(vec![]).unwrap();
+    let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+    let vm = MoveVM::default();
 
     let storage: InMemoryStorage = InMemoryStorage::new();
     let mut session = vm.new_session(&storage);
@@ -108,7 +110,7 @@ fn instantiation_err() {
     cm.serialize(&mut mod_bytes).unwrap();
 
     session
-        .publish_module(mod_bytes, addr, &mut GasStatus::new_unmetered())
+        .publish_module(&loader, mod_bytes, addr, &mut GasStatus::new_unmetered())
         .expect("Module must publish");
 
     let mut ty_arg = TypeTag::U128;
@@ -123,6 +125,7 @@ fn instantiation_err() {
     }
 
     let err = session.execute_entry_function(
+        &loader,
         &cm.self_id(),
         ident_str!("f"),
         vec![ty_arg],

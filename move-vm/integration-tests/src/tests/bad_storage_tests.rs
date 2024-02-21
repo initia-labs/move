@@ -16,6 +16,7 @@ use move_core_types::{
     vm_status::{StatusCode, StatusType},
 };
 use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{loader::Loader, config::VMConfig, native_functions::NativeFunctions};
 use move_vm_test_utils::{DeltaStorage, InMemoryStorage};
 use move_vm_types::gas::UnmeteredGasMeter;
 
@@ -86,17 +87,18 @@ fn test_malformed_resource() {
     m.serialize(&mut blob).unwrap();
     storage.publish_or_overwrite_module(m.self_id(), blob);
 
-    let vm = MoveVM::new(move_stdlib::natives::all_natives(
+    let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
         AccountAddress::from_hex_literal("0x1").unwrap(),
         move_stdlib::natives::GasParameters::zeros(),
-    ))
-    .unwrap();
+    )).unwrap(), VMConfig::default());
+    let vm = MoveVM::default();
 
     // Execute the first script to publish a resource Foo.
     let mut script_blob = vec![];
     s1.serialize(&mut script_blob).unwrap();
     let mut sess = vm.new_session(&storage);
     sess.execute_script(
+        &loader,
         script_blob,
         vec![],
         vec![MoveValue::Signer(TEST_ADDR).simple_serialize().unwrap()],
@@ -104,7 +106,7 @@ fn test_malformed_resource() {
     )
     .map(|_| ())
     .unwrap();
-    let changeset = sess.finish().unwrap();
+    let changeset = sess.finish(&loader).unwrap();
     storage.apply(changeset).unwrap();
 
     // Execute the second script and make sure it succeeds. This script simply checks
@@ -115,6 +117,7 @@ fn test_malformed_resource() {
     {
         let mut sess = vm.new_session(&storage);
         sess.execute_script(
+            &loader,
             script_blob.clone(),
             vec![],
             vec![MoveValue::Signer(TEST_ADDR).simple_serialize().unwrap()],
@@ -142,6 +145,7 @@ fn test_malformed_resource() {
         let mut sess = vm.new_session(&storage);
         let err = sess
             .execute_script(
+                &loader,
                 script_blob,
                 vec![],
                 vec![MoveValue::Signer(TEST_ADDR).simple_serialize().unwrap()],
@@ -177,9 +181,12 @@ fn test_malformed_module() {
     {
         let mut storage = InMemoryStorage::new();
         storage.publish_or_overwrite_module(m.self_id(), blob.clone());
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
+    
         let mut sess = vm.new_session(&storage);
         sess.execute_function_bypass_visibility(
+            &loader,
             &module_id,
             &fun_name,
             vec![],
@@ -202,10 +209,12 @@ fn test_malformed_module() {
         blob[3] = 0xEF;
         let mut storage = InMemoryStorage::new();
         storage.publish_or_overwrite_module(m.self_id(), blob);
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
         let err = sess
             .execute_function_bypass_visibility(
+                &loader,
                 &module_id,
                 &fun_name,
                 vec![],
@@ -241,10 +250,13 @@ fn test_unverifiable_module() {
         m.serialize(&mut blob).unwrap();
         storage.publish_or_overwrite_module(m.self_id(), blob);
 
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
+    
         let mut sess = vm.new_session(&storage);
 
         sess.execute_function_bypass_visibility(
+            &loader,
             &module_id,
             &fun_name,
             vec![],
@@ -265,11 +277,13 @@ fn test_unverifiable_module() {
         m.serialize(&mut blob).unwrap();
         storage.publish_or_overwrite_module(m.self_id(), blob);
 
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
 
         let err = sess
             .execute_function_bypass_visibility(
+                &loader,
                 &module_id,
                 &fun_name,
                 vec![],
@@ -316,10 +330,12 @@ fn test_missing_module_dependency() {
         storage.publish_or_overwrite_module(m.self_id(), blob_m);
         storage.publish_or_overwrite_module(n.self_id(), blob_n.clone());
 
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
 
         sess.execute_function_bypass_visibility(
+            &loader,
             &module_id,
             &fun_name,
             vec![],
@@ -335,11 +351,13 @@ fn test_missing_module_dependency() {
         let mut storage = InMemoryStorage::new();
         storage.publish_or_overwrite_module(n.self_id(), blob_n);
 
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
 
         let err = sess
             .execute_function_bypass_visibility(
+                &loader,
                 &module_id,
                 &fun_name,
                 vec![],
@@ -386,10 +404,12 @@ fn test_malformed_module_dependency() {
         storage.publish_or_overwrite_module(m.self_id(), blob_m.clone());
         storage.publish_or_overwrite_module(n.self_id(), blob_n.clone());
 
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
 
         sess.execute_function_bypass_visibility(
+            &loader,
             &module_id,
             &fun_name,
             vec![],
@@ -411,11 +431,13 @@ fn test_malformed_module_dependency() {
         storage.publish_or_overwrite_module(m.self_id(), blob_m);
         storage.publish_or_overwrite_module(n.self_id(), blob_n);
 
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
 
         let err = sess
             .execute_function_bypass_visibility(
+                &loader,
                 &module_id,
                 &fun_name,
                 vec![],
@@ -463,10 +485,12 @@ fn test_unverifiable_module_dependency() {
         storage.publish_or_overwrite_module(m.self_id(), blob_m);
         storage.publish_or_overwrite_module(n.self_id(), blob_n.clone());
 
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
 
         sess.execute_function_bypass_visibility(
+            &loader,
             &module_id,
             &fun_name,
             vec![],
@@ -488,11 +512,13 @@ fn test_unverifiable_module_dependency() {
         storage.publish_or_overwrite_module(m.self_id(), blob_m);
         storage.publish_or_overwrite_module(n.self_id(), blob_n);
 
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
 
         let err = sess
             .execute_function_bypass_visibility(
+                &loader,
                 &module_id,
                 &fun_name,
                 vec![],
@@ -558,11 +584,13 @@ fn test_storage_returns_bogus_error_when_loading_module() {
         let storage = BogusStorage {
             bad_status_code: *error_code,
         };
-        let vm = MoveVM::new(vec![]).unwrap();
+        let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
 
         let err = sess
             .execute_function_bypass_visibility(
+                &loader,
                 &module_id,
                 &fun_name,
                 vec![],
@@ -627,14 +655,15 @@ fn test_storage_returns_bogus_error_when_loading_resource() {
         };
         let storage = DeltaStorage::new(&storage, &delta);
 
-        let vm = MoveVM::new(move_stdlib::natives::all_natives(
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
             AccountAddress::from_hex_literal("0x1").unwrap(),
             move_stdlib::natives::GasParameters::zeros(),
-        ))
-        .unwrap();
+        )).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut sess = vm.new_session(&storage);
 
         sess.execute_function_bypass_visibility(
+            &loader,
             &m_id,
             &foo_name,
             vec![],
@@ -645,6 +674,7 @@ fn test_storage_returns_bogus_error_when_loading_resource() {
 
         let err = sess
             .execute_function_bypass_visibility(
+                &loader,
                 &m_id,
                 &bar_name,
                 vec![],

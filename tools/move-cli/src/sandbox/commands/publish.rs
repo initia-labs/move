@@ -13,7 +13,9 @@ use anyhow::{bail, Result};
 use move_binary_format::errors::Location;
 use move_command_line_common::env::get_bytecode_version_from_env;
 use move_package::compilation::compiled_package::CompiledPackage;
-use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{
+    config::VMConfig, loader::Loader, move_vm::MoveVM, native_functions::NativeFunctions,
+};
 use move_vm_test_utils::gas_schedule::CostTable;
 use std::collections::BTreeMap;
 
@@ -54,11 +56,11 @@ pub fn publish(
                     None => bail!("Invalid module name in publish ordering: {}", name),
                     Some(unit) => {
                         ordered_modules.push(*unit);
-                    },
+                    }
                 }
             }
             ordered_modules
-        },
+        }
         None => compiled_modules,
     };
 
@@ -86,7 +88,9 @@ pub fn publish(
 
     // use the the publish_module API from the VM if we do not allow breaking changes
     if !ignore_breaking_changes {
-        let vm = MoveVM::new(natives).unwrap();
+        // let vm = MoveVM::new(natives).unwrap();
+        let loader = Loader::new(NativeFunctions::new(natives).unwrap(), VMConfig::default());
+        let vm = MoveVM::default();
         let mut gas_status = get_gas_status(cost_table, None)?;
         let mut session = vm.new_session(state);
         let mut has_error = false;
@@ -103,19 +107,23 @@ pub fn publish(
                 match &sender_opt {
                     None => {
                         sender_opt = Some(module_address);
-                    },
+                    }
                     Some(val) => {
                         if val != &module_address {
                             bail!("All modules in the bundle must share the same address");
                         }
-                    },
+                    }
                 }
             }
             match sender_opt {
                 None => bail!("No modules to publish"),
                 Some(sender) => {
-                    let res =
-                        session.publish_module_bundle(module_bytes_vec, sender, &mut gas_status);
+                    let res = session.publish_module_bundle(
+                        &loader,
+                        module_bytes_vec,
+                        sender,
+                        &mut gas_status,
+                    );
                     if let Err(err) = res {
                         println!("Invalid multi-module publishing: {}", err);
                         if let Location::Module(module_id) = err.location() {
@@ -131,7 +139,7 @@ pub fn publish(
                         }
                         has_error = true;
                     }
-                },
+                }
             }
         } else {
             // publish modules sequentially, one module at a time
@@ -140,7 +148,7 @@ pub fn publish(
                 let id = module(&unit.unit)?.self_id();
                 let sender = *id.address();
 
-                let res = session.publish_module(module_bytes, sender, &mut gas_status);
+                let res = session.publish_module(&loader, module_bytes, sender, &mut gas_status);
                 if let Err(err) = res {
                     explain_publish_error(err, state, unit)?;
                     has_error = true;
@@ -150,7 +158,7 @@ pub fn publish(
         }
 
         if !has_error {
-            let changeset = session.finish().map_err(|e| e.into_vm_status())?;
+            let changeset = session.finish(&loader).map_err(|e| e.into_vm_status())?;
             if verbose {
                 explain_publish_changeset(&changeset);
             }

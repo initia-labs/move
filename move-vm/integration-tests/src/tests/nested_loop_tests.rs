@@ -5,6 +5,7 @@ use crate::compiler::{as_module, as_script, compile_units};
 use move_bytecode_verifier::VerifierConfig;
 use move_core_types::account_address::AccountAddress;
 use move_vm_runtime::{config::VMConfig, move_vm::MoveVM};
+use move_vm_runtime::{loader::Loader, native_functions::NativeFunctions};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas::UnmeteredGasMeter;
 
@@ -38,46 +39,40 @@ fn test_publish_module_with_nested_loops() {
     // Should succeed with max_loop_depth = 2
     {
         let storage = InMemoryStorage::new();
-        let vm = MoveVM::new_with_config(
-            move_stdlib::natives::all_natives(
-                AccountAddress::from_hex_literal("0x1").unwrap(),
-                move_stdlib::natives::GasParameters::zeros(),
-            ),
-            VMConfig {
-                verifier: VerifierConfig {
-                    max_loop_depth: Some(2),
-                    ..Default::default()
-                },
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
+            AccountAddress::from_hex_literal("0x1").unwrap(),
+            move_stdlib::natives::GasParameters::zeros(),
+        )).unwrap(), VMConfig {
+            verifier: VerifierConfig {
+                max_loop_depth: Some(2),
                 ..Default::default()
             },
-        )
-        .unwrap();
+            ..Default::default()
+        });
+        let vm = MoveVM::default();
 
         let mut sess = vm.new_session(&storage);
-        sess.publish_module(m_blob.clone(), TEST_ADDR, &mut UnmeteredGasMeter)
+        sess.publish_module(&loader, m_blob.clone(), TEST_ADDR, &mut UnmeteredGasMeter)
             .unwrap();
     }
 
     // Should fail with max_loop_depth = 1
     {
         let storage = InMemoryStorage::new();
-        let vm = MoveVM::new_with_config(
-            move_stdlib::natives::all_natives(
-                AccountAddress::from_hex_literal("0x1").unwrap(),
-                move_stdlib::natives::GasParameters::zeros(),
-            ),
-            VMConfig {
-                verifier: VerifierConfig {
-                    max_loop_depth: Some(1),
-                    ..Default::default()
-                },
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
+            AccountAddress::from_hex_literal("0x1").unwrap(),
+            move_stdlib::natives::GasParameters::zeros(),
+        )).unwrap(), VMConfig {
+            verifier: VerifierConfig {
+                max_loop_depth: Some(1),
                 ..Default::default()
             },
-        )
-        .unwrap();
+            ..Default::default()
+        });
+        let vm = MoveVM::default();
 
         let mut sess = vm.new_session(&storage);
-        sess.publish_module(m_blob, TEST_ADDR, &mut UnmeteredGasMeter)
+        sess.publish_module(&loader, m_blob, TEST_ADDR, &mut UnmeteredGasMeter)
             .unwrap_err();
     }
 }
@@ -110,48 +105,42 @@ fn test_run_script_with_nested_loops() {
     // Should succeed with max_loop_depth = 2
     {
         let storage = InMemoryStorage::new();
-        let vm = MoveVM::new_with_config(
-            move_stdlib::natives::all_natives(
-                AccountAddress::from_hex_literal("0x1").unwrap(),
-                move_stdlib::natives::GasParameters::zeros(),
-            ),
-            VMConfig {
-                verifier: VerifierConfig {
-                    max_loop_depth: Some(2),
-                    ..Default::default()
-                },
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
+            AccountAddress::from_hex_literal("0x1").unwrap(),
+            move_stdlib::natives::GasParameters::zeros(),
+        )).unwrap(), VMConfig {
+            verifier: VerifierConfig {
+                max_loop_depth: Some(2),
                 ..Default::default()
             },
-        )
-        .unwrap();
+            ..Default::default()
+        });
+        let vm = MoveVM::default();
 
         let mut sess = vm.new_session(&storage);
         let args: Vec<Vec<u8>> = vec![];
-        sess.execute_script(s_blob.clone(), vec![], args, &mut UnmeteredGasMeter)
+        sess.execute_script(&loader, s_blob.clone(), vec![], args, &mut UnmeteredGasMeter)
             .unwrap();
     }
 
     // Should fail with max_loop_depth = 1
     {
         let storage = InMemoryStorage::new();
-        let vm = MoveVM::new_with_config(
-            move_stdlib::natives::all_natives(
-                AccountAddress::from_hex_literal("0x1").unwrap(),
-                move_stdlib::natives::GasParameters::zeros(),
-            ),
-            VMConfig {
-                verifier: VerifierConfig {
-                    max_loop_depth: Some(1),
-                    ..Default::default()
-                },
+        let loader = Loader::new(NativeFunctions::new(move_stdlib::natives::all_natives(
+            AccountAddress::from_hex_literal("0x1").unwrap(),
+            move_stdlib::natives::GasParameters::zeros(),
+        )).unwrap(), VMConfig {
+            verifier: VerifierConfig {
+                max_loop_depth: Some(1),
                 ..Default::default()
             },
-        )
-        .unwrap();
+            ..Default::default()
+        });
+        let vm = MoveVM::default();
 
         let mut sess = vm.new_session(&storage);
         let args: Vec<Vec<u8>> = vec![];
-        sess.execute_script(s_blob, vec![], args, &mut UnmeteredGasMeter)
+        sess.execute_script(&loader, s_blob, vec![], args, &mut UnmeteredGasMeter)
             .unwrap_err();
     }
 }
