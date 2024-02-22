@@ -7,10 +7,8 @@ use crate::{
     native_extensions::NativeContextExtensions,
     runtime::VMRuntime, session::Session, session_cache::SessionCache,
 };
-use move_binary_format::errors::{PartialVMError};
-use move_core_types::{
-    resolver::MoveResolver,
-};
+use move_binary_format::errors::PartialVMError;
+use move_core_types::resolver::MoveResolver;
 
 pub struct MoveVM {
     pub(crate) runtime: VMRuntime,

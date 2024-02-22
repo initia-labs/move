@@ -21,7 +21,7 @@ use move_binary_format::{
 use move_bytecode_verifier::script_signature;
 use move_core_types::{
     account_address::AccountAddress,
-    identifier::{IdentStr},
+    identifier::IdentStr,
     language_storage::{ModuleId, TypeTag},
     value::MoveTypeLayout,
     vm_status::StatusCode,

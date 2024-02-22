@@ -509,6 +509,14 @@ impl<'r, 'l> Session<'r, 'l> {
             .get_module(module_id, &self.session_cache)?
             .and_then(|v| f(&v.compiled_module().metadata)))
     }
+
+    pub fn load_module_from_cache(&self, module_id: &ModuleId) -> Option<Bytes> {
+        self.session_cache.load_module_from_cache(module_id)
+    }
+
+    pub fn load_checksum_from_cache(&self, module_id: &ModuleId) -> Option<Checksum> {
+        self.session_cache.load_checksum_from_cache(module_id)
+    }
 }
 
 pub struct LoadedFunctionInstantiation {

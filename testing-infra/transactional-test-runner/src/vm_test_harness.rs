@@ -175,7 +175,7 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
                         let id = module.self_id();
                         let sender = *id.address();
                         session
-                            .publish_module(module_bytes, sender, loader, gas_status)
+                            .publish_module(loader, module_bytes, sender, gas_status)
                             .unwrap();
                     }
                     Ok(())
@@ -223,9 +223,9 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
                 );
 
                 session.publish_module_bundle_with_compat_config(
+                    loader, 
                     vec![module_bytes],
                     sender,
-                    loader,
                     gas_status,
                     compat,
                 )
@@ -276,7 +276,7 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
             .perform_session_action(
                 gas_budget,
                 |session, loader, gas_status| {
-                    session.execute_script(script_bytes, type_args, args, loader, gas_status)
+                    session.execute_script(loader, script_bytes, type_args, args, gas_status)
                 },
                 VMConfig::from(extra_args),
             )
@@ -323,7 +323,7 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
                 gas_budget,
                 |session, loader, gas_status| {
                     session.execute_function_bypass_visibility(
-                        module, function, type_args, args, loader, gas_status,
+                        loader, module, function, type_args, args, gas_status,
                     )
                 },
                 VMConfig::from(extra_args),
