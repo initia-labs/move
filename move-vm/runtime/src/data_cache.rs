@@ -241,6 +241,7 @@ impl<'r> TransactionDataCache<'r> {
                 None => GlobalValue::none(),
             };
 
+            
             self.account_map
                 .get_mut(&addr)
                 .unwrap()

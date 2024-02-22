@@ -108,4 +108,12 @@ impl<'r> SessionCache<'r> {
             ),
         }
     }
+
+    pub fn load_module_from_cache(&self, module_id: &ModuleId) -> Option<Bytes> {
+        self.modules.read().get(module_id).cloned()
+    }
+
+    pub fn load_checksum_from_cache(&self, module_id: &ModuleId) -> Option<Checksum> {
+        self.checksums.read().get(module_id).cloned()
+    }
 }
