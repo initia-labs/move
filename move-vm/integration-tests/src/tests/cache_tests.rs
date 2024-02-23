@@ -13,7 +13,6 @@ use move_core_types::value::{MoveTypeLayout, MoveValue};
 use move_core_types::vm_status::StatusCode;
 use move_vm_runtime::session::SerializedReturnValues;
 use move_vm_runtime::{config::VMConfig, move_vm::MoveVM};
-use move_vm_runtime::{loader::Loader, native_functions::NativeFunctions};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas::UnmeteredGasMeter;
 use move_vm_types::loaded_data::runtime_types::Checksum;
@@ -23,11 +22,10 @@ use sha3::{Digest, Sha3_256};
 
 const WORKING_ACCOUNT: AccountAddress = AccountAddress::TWO;
 
-fn get_test_base(config: VMConfig) -> (InMemoryStorage, Arc<Loader>, Arc<MoveVM>) {
+fn get_test_base(config: VMConfig) -> (InMemoryStorage, Arc<MoveVM>) {
 	let data_store = InMemoryStorage::new();
-	let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), config);
-    let vm = MoveVM::default();
-	(data_store, Arc::new(loader), Arc::new(vm))
+    let vm = MoveVM::new_with_config(vec![], config).expect("should make move vm");
+	(data_store, Arc::new(vm))
 }
 
 fn get_modules(append_path: &str) -> Vec<CompiledModule> {
@@ -36,7 +34,7 @@ fn get_modules(append_path: &str) -> Vec<CompiledModule> {
     compile_modules_in_file(&path).unwrap()
 }
 
-fn test_update_modules(data_store: &mut InMemoryStorage, loader: &Loader, vm: &MoveVM, base_path: &str, update_path: &str, updated_modules: Vec<&str>) {
+fn test_update_modules(data_store: &mut InMemoryStorage, vm: &MoveVM, base_path: &str, update_path: &str, updated_modules: Vec<&str>) {
 	let mut session = vm.new_session(data_store);
 	let mut module_bundles = vec![];
 	for module in get_modules(base_path) {
@@ -47,10 +45,10 @@ fn test_update_modules(data_store: &mut InMemoryStorage, loader: &Loader, vm: &M
 		module_bundles.push(module_bytes);
 	}
 	session
-		.publish_module_bundle_relax_compatibility(loader, module_bundles, WORKING_ACCOUNT, &mut UnmeteredGasMeter)
+		.publish_module_bundle_relax_compatibility(module_bundles, WORKING_ACCOUNT, &mut UnmeteredGasMeter)
 		.unwrap_or_else(|_| panic!("failure publishing modules"));
-	let changeset = session.finish(loader).expect("failure getting write set");
-	loader.flush_unused_module_cache();
+	let changeset = session.finish().expect("failure getting write set");
+	vm.flush_unused_module_cache();
 
 	let account_changes = changeset.accounts().get(&WORKING_ACCOUNT).unwrap_or_else(|| panic!("should exist {}", WORKING_ACCOUNT));
 	let checksums = account_changes.checksums();
@@ -73,7 +71,7 @@ fn test_update_modules(data_store: &mut InMemoryStorage, loader: &Loader, vm: &M
 		module_bundles.push(module_bytes);
 	}
 	session
-		.publish_module_bundle_relax_compatibility(loader, module_bundles, WORKING_ACCOUNT, &mut UnmeteredGasMeter)
+		.publish_module_bundle_relax_compatibility(module_bundles, WORKING_ACCOUNT, &mut UnmeteredGasMeter)
 		.unwrap_or_else(|_| panic!("failure publishing modules"));
 	
 	update_module_map.into_iter().for_each(|(module_id, (module_bytes, checksum))| {
@@ -84,8 +82,8 @@ fn test_update_modules(data_store: &mut InMemoryStorage, loader: &Loader, vm: &M
 		assert_eq!(checksum, session_cache_checksum, "updated checksum should equal with checksum in session cache");
 	});
 
-	let changeset = session.finish(loader).expect("failure getting write set");
-	loader.flush_unused_module_cache();
+	let changeset = session.finish().expect("failure getting write set");
+	vm.flush_unused_module_cache();
 	let account_changes = changeset.accounts().get(&WORKING_ACCOUNT).unwrap_or_else(|| panic!("should exist {}", WORKING_ACCOUNT));
 
 	let update_checksums = account_changes.checksums();
@@ -111,10 +109,9 @@ fn test_update_modules(data_store: &mut InMemoryStorage, loader: &Loader, vm: &M
 fn test_default_update_module() {
 	let config = VMConfig::default();
 
-	let (mut data_store, loader, vm) = get_test_base(config);
+	let (mut data_store, vm) = get_test_base(config);
 	test_update_modules(
 		&mut data_store, 
-		&loader, 
 		&vm,
 		"src/tests/loader_tests_modules.move",
 		"src/tests/loader_tests_update_modules.move",
@@ -128,10 +125,9 @@ fn test_small_cache_update_module() {
 		module_cache_capacity: 1,
 		..Default::default()
 	};
-	let (mut data_store, loader, vm) = get_test_base(config);
+	let (mut data_store, vm) = get_test_base(config);
 	test_update_modules(
 		&mut data_store, 
-		&loader, 
 		&vm,
 		"src/tests/loader_tests_modules.move",
 		"src/tests/loader_tests_update_modules.move",
@@ -145,10 +141,9 @@ fn test_update_function(update_path: &str, cache_size: usize) -> VMResult<Serial
 		..Default::default()
 	};
 
-	let (mut data_store, loader, vm) = get_test_base(config);
+	let (mut data_store, vm) = get_test_base(config);
 	test_update_modules(
 		&mut data_store, 
-		&loader, 
 		&vm,
 		"src/tests/cache_test_modules/plus.move",
 		update_path,
@@ -166,7 +161,6 @@ fn test_update_function(update_path: &str, cache_size: usize) -> VMResult<Serial
         .collect();
 
     session.execute_function_bypass_visibility(
-        &loader,
         &module_id,
         &fun_name,
         vec![],
@@ -243,17 +237,16 @@ fn test_new_loader_after_update_function(update_path: &str, cache_size: usize) -
 		..Default::default()
 	};
 
-	let (mut data_store, loader, vm) = get_test_base(config.clone());
+	let (mut data_store, vm) = get_test_base(config.clone());
 	test_update_modules(
 		&mut data_store, 
-		&loader, 
 		&vm,
 		"src/tests/cache_test_modules/plus.move",
 		update_path,
 		vec!["B"],
 	);
 
-	let loader = Loader::new(NativeFunctions::new(vec![]).unwrap(), config);
+	let vm = MoveVM::new_with_config(vec![], config).expect("should make move vm");
 
 	let mut session = vm.new_session(&data_store);
 	let module_id = ModuleId::new(WORKING_ACCOUNT, Identifier::new("A").unwrap());
@@ -266,7 +259,6 @@ fn test_new_loader_after_update_function(update_path: &str, cache_size: usize) -
         .collect();
 
     session.execute_function_bypass_visibility(
-        &loader,
         &module_id,
         &fun_name,
         vec![],
