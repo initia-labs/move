@@ -62,7 +62,7 @@ impl MoveVM {
         native_extensions: NativeContextExtensions<'r>,
     ) -> Session<'r, '_> {
         Session {
-            move_vm: self,
+            runtime: &self.runtime,
             data_cache: TransactionDataCache::new(remote),
             session_cache: SessionCache::new(remote),
             native_extensions,
@@ -80,10 +80,10 @@ impl MoveVM {
     }
 
     pub fn flush_unused_module_cache(&self) {
-        self.runtime.loader.flush_unused_module_cache()
+        self.runtime.flush_unused_module_cache()
     }
 
     pub fn flush_unused_script_cache(&self) {
-        self.runtime.loader.flush_unused_script_cache()
+        self.runtime.flush_unused_script_cache()
     }
 }
