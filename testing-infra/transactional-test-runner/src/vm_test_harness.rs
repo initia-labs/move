@@ -221,7 +221,6 @@ impl<'a> MoveTestAdapter<'a> for SimpleVMTestAdapter<'a> {
                 );
 
                 session.publish_module_bundle_with_compat_config(
-                    loader, 
                     vec![module_bytes],
                     sender,
                     gas_status,

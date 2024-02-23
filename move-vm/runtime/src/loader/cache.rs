@@ -47,7 +47,7 @@ impl ModuleCache {
         checksum: &Checksum,
         id: &StructIdentifier,
     ) -> PartialVMResult<Arc<StructType>> {
-        self.get(&checksum)
+        self.get(checksum)
             .and_then(|module| {
                 let idx = module.struct_map.get(&id.name)?;
                 Some(module.structs.get(*idx)?.definition_struct_type.clone())
