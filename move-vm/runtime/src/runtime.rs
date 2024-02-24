@@ -3,12 +3,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    config::VMConfig,
     data_cache::TransactionDataCache,
     interpreter::Interpreter,
-    loader::{Function, LoadedFunction, Loader},
+    loader::{ChecksumStorageForVerify, Function, LoadedFunction, Loader},
     native_extensions::NativeContextExtensions,
+    native_functions::{NativeFunction, NativeFunctions},
     session::{LoadedFunctionInstantiation, SerializedReturnValues},
+    session_cache::SessionCache,
 };
+use bytes::Bytes;
 use move_binary_format::{
     access::ModuleAccess,
     compatibility::Compatibility,
@@ -19,45 +23,70 @@ use move_binary_format::{
 use move_bytecode_verifier::script_signature;
 use move_core_types::{
     account_address::AccountAddress,
-    identifier::IdentStr,
+    identifier::{IdentStr, Identifier},
     language_storage::{ModuleId, TypeTag},
     value::MoveTypeLayout,
     vm_status::StatusCode,
 };
 use move_vm_types::{
     gas::GasMeter,
-    loaded_data::runtime_types::Type,
+    loaded_data::runtime_types::{Checksum, Type},
     values::{Locals, Reference, VMValueCast, Value},
 };
-use std::{borrow::Borrow, collections::BTreeSet, sync::Arc};
+use sha3::{Digest, Sha3_256};
+use std::{
+    borrow::Borrow,
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 /// An instantiation of the MoveVM.
-#[derive(Clone)]
-pub(crate) struct VMRuntime {}
+pub struct VMRuntime {
+    pub(crate) loader: Loader,
+}
 
 impl VMRuntime {
-    pub(crate) fn new() -> Self {
-        VMRuntime {}
+    pub fn new(
+        natives: impl IntoIterator<Item = (AccountAddress, Identifier, Identifier, NativeFunction)>,
+        vm_config: VMConfig,
+    ) -> PartialVMResult<Self> {
+        Ok(VMRuntime {
+            loader: Loader::new(NativeFunctions::new(natives)?, vm_config),
+        })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn publish_module_bundle(
         &self,
         modules: Vec<Vec<u8>>,
         sender: AccountAddress,
-        loader: &Loader,
+        
         data_store: &mut TransactionDataCache,
+        session_cache: &mut SessionCache,
         _gas_meter: &mut impl GasMeter,
         compat: Compatibility,
     ) -> VMResult<()> {
+        // make checksum records for the publishing modules
+        let mut checksums: HashMap<ModuleId, Checksum> = HashMap::new();
+
         // deserialize the modules. Perform bounds check. After this indexes can be
         // used with the `[]` operator
         let compiled_modules = match modules
             .iter()
             .map(|blob| {
+                let mut sha3_256 = Sha3_256::new();
+                sha3_256.update(blob);
+                let checksum: Checksum = sha3_256.finalize().into();
+
                 CompiledModule::deserialize_with_config(
                     blob,
-                    &loader.vm_config().deserializer_config,
+                    &self.loader.vm_config().deserializer_config,
                 )
+                .map(|m| {
+                    checksums.insert(m.self_id(), checksum);
+
+                    m
+                })
             })
             .collect::<PartialVMResult<Vec<_>>>()
         {
@@ -97,9 +126,10 @@ impl VMRuntime {
         for module in &compiled_modules {
             let module_id = module.self_id();
 
-            if data_store.exists_module(&module_id)? && compat.need_check_compat() {
-                let old_module_ref = loader.load_module(&module_id, data_store)?;
-                let old_module = old_module_ref.module();
+            if session_cache.exists_module(&module_id)? && compat.need_check_compat() {
+                let old_module_ref =
+                    self.loader.load_module(&module_id, session_cache, session_cache)?;
+                let old_module = old_module_ref.compiled_module();
                 let old_m = normalized::Module::new(old_module);
                 let new_m = normalized::Module::new(module);
                 compat
@@ -113,7 +143,11 @@ impl VMRuntime {
         }
 
         // Perform bytecode and loading verification. Modules must be sorted in topological order.
-        loader.verify_module_bundle_for_publication(&compiled_modules, data_store)?;
+        self.loader.verify_module_bundle_for_publication(
+            &compiled_modules,
+            session_cache,
+            &ChecksumStorageForVerify::new(session_cache, &checksums),
+        )?;
 
         // NOTE: we want to (informally) argue that all modules pass the linking check before being
         // published to the data store.
@@ -170,19 +204,25 @@ impl VMRuntime {
 
         // All modules verified, publish them to data cache
         for (module, blob) in compiled_modules.into_iter().zip(modules.into_iter()) {
-            let is_republishing = data_store.exists_module(&module.self_id())?;
-            data_store.publish_module(&module.self_id(), blob, is_republishing)?;
+            let module_id = module.self_id();
+            let checksum = checksums.remove(&module_id).unwrap();
+            let is_republishing = session_cache.exists_module(&module_id)?;
+
+            let module_bytes: Bytes = blob.into();
+            session_cache.record_publish(&module_id, module_bytes.clone(), checksum);
+            data_store.publish_module(&module_id, module_bytes, checksum, is_republishing)?;
         }
         Ok(())
     }
 
     fn deserialize_value(
         &self,
-        loader: &Loader,
+        
+        checksum_store: &SessionCache,
         ty: &Type,
         arg: impl Borrow<[u8]>,
     ) -> PartialVMResult<Value> {
-        let layout = match loader.type_to_type_layout(ty) {
+        let layout = match self.loader.type_to_type_layout(ty, checksum_store) {
             Ok(layout) => layout,
             Err(_err) => {
                 return Err(PartialVMError::new(
@@ -203,7 +243,8 @@ impl VMRuntime {
 
     fn deserialize_args(
         &self,
-        loader: &Loader,
+        
+        checksum_store: &SessionCache,
         arg_tys: Vec<Type>,
         serialized_args: Vec<impl Borrow<[u8]>>,
     ) -> PartialVMResult<(Locals, Vec<Value>)> {
@@ -231,14 +272,14 @@ impl VMRuntime {
                 Type::MutableReference(inner_t) | Type::Reference(inner_t) => {
                     dummy_locals.store_loc(
                         idx,
-                        self.deserialize_value(loader, inner_t, arg_bytes)?,
-                        loader
+                        self.deserialize_value(checksum_store, inner_t, arg_bytes)?,
+                        self.loader
                             .vm_config()
                             .enable_invariant_violation_check_in_swap_loc,
                     )?;
                     dummy_locals.borrow_loc(idx)
                 }
-                _ => self.deserialize_value(loader, &arg_ty, arg_bytes),
+                _ => self.deserialize_value( checksum_store, &arg_ty, arg_bytes),
             })
             .collect::<PartialVMResult<Vec<_>>>()?;
         Ok((dummy_locals, deserialized_args))
@@ -246,7 +287,8 @@ impl VMRuntime {
 
     fn serialize_return_value(
         &self,
-        loader: &Loader,
+        
+        checksum_store: &SessionCache,
         ty: &Type,
         value: Value,
     ) -> PartialVMResult<(Vec<u8>, MoveTypeLayout)> {
@@ -263,11 +305,13 @@ impl VMRuntime {
             _ => (ty, value),
         };
 
-        let layout = loader.type_to_type_layout(ty).map_err(|_err| {
-            PartialVMError::new(StatusCode::VERIFICATION_ERROR).with_message(
-                "entry point functions cannot have non-serializable return types".to_string(),
-            )
-        })?;
+        let layout = self.loader
+            .type_to_type_layout(ty, checksum_store)
+            .map_err(|_err| {
+                PartialVMError::new(StatusCode::VERIFICATION_ERROR).with_message(
+                    "entry point functions cannot have non-serializable return types".to_string(),
+                )
+            })?;
         let bytes = value.simple_serialize(&layout).ok_or_else(|| {
             PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                 .with_message("failed to serialize return values".to_string())
@@ -275,18 +319,21 @@ impl VMRuntime {
 
         // INITIA CUSTOM
         // for serialization
-        let layout_for_return = loader.type_to_fully_annotated_layout(ty).map_err(|_err| {
-            PartialVMError::new(StatusCode::VERIFICATION_ERROR).with_message(
-                "entry point functions cannot have non-serializable return types".to_string(),
-            )
-        })?;
+        let layout_for_return = self.loader
+            .type_to_fully_annotated_layout(ty, checksum_store)
+            .map_err(|_err| {
+                PartialVMError::new(StatusCode::VERIFICATION_ERROR).with_message(
+                    "entry point functions cannot have non-serializable return types".to_string(),
+                )
+            })?;
 
         Ok((bytes, layout_for_return))
     }
 
     fn serialize_return_values(
         &self,
-        loader: &Loader,
+        
+        checksum_store: &SessionCache,
         return_types: &[Type],
         return_values: Vec<Value>,
     ) -> PartialVMResult<Vec<(Vec<u8>, MoveTypeLayout)>> {
@@ -305,10 +352,11 @@ impl VMRuntime {
         return_types
             .iter()
             .zip(return_values)
-            .map(|(ty, value)| self.serialize_return_value(loader, ty, value))
+            .map(|(ty, value)| self.serialize_return_value( checksum_store, ty, value))
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::needless_collect)]
     fn execute_function_impl(
         &self,
@@ -317,8 +365,9 @@ impl VMRuntime {
         param_types: Vec<Type>,
         return_types: Vec<Type>,
         serialized_args: Vec<impl Borrow<[u8]>>,
-        loader: &Loader,
+        
         data_store: &mut TransactionDataCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
     ) -> VMResult<SerializedReturnValues> {
@@ -336,7 +385,7 @@ impl VMRuntime {
             })
             .collect::<Vec<_>>();
         let (mut dummy_locals, deserialized_args) = self
-            .deserialize_args(loader, arg_types, serialized_args)
+            .deserialize_args(checksum_store, arg_types, serialized_args)
             .map_err(|e| e.finish(Location::Undefined))?;
         let return_types = return_types
             .into_iter()
@@ -349,13 +398,14 @@ impl VMRuntime {
             ty_args,
             deserialized_args,
             data_store,
+            checksum_store,
             gas_meter,
             extensions,
-            &loader,
+            &self.loader,
         )?;
 
         let serialized_return_values = self
-            .serialize_return_values(loader, &return_types, return_values)
+            .serialize_return_values(checksum_store, &return_types, return_values)
             .map_err(|e| e.finish(Location::Undefined))?;
         let serialized_mut_ref_outputs = mut_ref_args
             .into_iter()
@@ -363,11 +413,12 @@ impl VMRuntime {
                 // serialize return values first in the case that a value points into this local
                 let local_val = dummy_locals.move_loc(
                     idx,
-                    loader
+                    self.loader
                         .vm_config()
                         .enable_invariant_violation_check_in_swap_loc,
                 )?;
-                let (bytes, layout) = self.serialize_return_value(loader, &ty, local_val)?;
+                let (bytes, layout) =
+                    self.serialize_return_value(checksum_store, &ty, local_val)?;
                 Ok((idx as LocalIndex, bytes, layout))
             })
             .collect::<PartialVMResult<_>>()
@@ -382,41 +433,50 @@ impl VMRuntime {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_function(
         &self,
         module: &ModuleId,
         function_name: &IdentStr,
         ty_args: Vec<TypeTag>,
         serialized_args: Vec<impl Borrow<[u8]>>,
-        loader: &Loader,
+        
         data_store: &mut TransactionDataCache,
+        session_cache: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         bypass_declared_entry_check: bool,
     ) -> VMResult<SerializedReturnValues> {
         // load the function
-        let (module, function, instantiation) =
-            loader.load_function(module, function_name, &ty_args, data_store)?;
+        let (module, function, instantiation) = self.loader.load_function(
+            module,
+            function_name,
+            &ty_args,
+            session_cache,
+            session_cache,
+        )?;
 
         self.execute_function_instantiation(
             LoadedFunction { module, function },
             instantiation,
             serialized_args,
-            loader,
             data_store,
+            session_cache,
             gas_meter,
             extensions,
             bypass_declared_entry_check,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_function_instantiation(
         &self,
         func: LoadedFunction,
         function_instantiation: LoadedFunctionInstantiation,
         serialized_args: Vec<impl Borrow<[u8]>>,
-        loader: &Loader,
+        
         data_store: &mut TransactionDataCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         bypass_declared_entry_check: bool,
@@ -452,7 +512,7 @@ impl VMRuntime {
         let LoadedFunction { module, function } = func;
 
         script_signature::verify_module_function_signature_by_name(
-            module.module(),
+            module.compiled_module(),
             IdentStr::new(function.as_ref().name()).expect(""),
             additional_signature_checks,
         )?;
@@ -464,21 +524,23 @@ impl VMRuntime {
             parameters,
             return_,
             serialized_args,
-            loader,
             data_store,
+            checksum_store,
             gas_meter,
             extensions,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     // See Session::execute_script for what contracts to follow.
     pub(crate) fn execute_script(
         &self,
         script: impl Borrow<[u8]>,
         ty_args: Vec<TypeTag>,
         serialized_args: Vec<impl Borrow<[u8]>>,
-        loader: &Loader,
+        
         data_store: &mut TransactionDataCache,
+        session_cache: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
     ) -> VMResult<SerializedReturnValues> {
@@ -490,7 +552,7 @@ impl VMRuntime {
                 parameters,
                 return_,
             },
-        ) = loader.load_script(script.borrow(), &ty_args, data_store)?;
+        ) = self.loader.load_script(script.borrow(), &ty_args, session_cache, session_cache)?;
         // execute the function
         self.execute_function_impl(
             func,
@@ -498,10 +560,27 @@ impl VMRuntime {
             parameters,
             return_,
             serialized_args,
-            loader,
             data_store,
+            session_cache,
             gas_meter,
             extensions,
         )
+    }
+
+    pub fn get_fully_annotated_type_layout(
+        &self,
+        session_cache: &SessionCache,
+        type_tag: &TypeTag,
+    ) -> VMResult<MoveTypeLayout> {
+        self.loader
+            .get_fully_annotated_type_layout(type_tag, session_cache, session_cache)
+    }
+
+    pub fn flush_unused_module_cache(&self) {
+        self.loader.flush_unused_module_cache()
+    }
+
+    pub fn flush_unused_script_cache(&self) {
+        self.loader.flush_unused_script_cache()
     }
 }

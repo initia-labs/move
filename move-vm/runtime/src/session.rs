@@ -3,11 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    config::VMConfig,
-    data_cache::TransactionDataCache,
-    loader::{LoadedFunction, Loader},
-    move_vm::MoveVM,
-    native_extensions::NativeContextExtensions,
+    config::VMConfig, data_cache::TransactionDataCache, loader::LoadedFunction, native_extensions::NativeContextExtensions, runtime::VMRuntime, session_cache::SessionCache
 };
 use bytes::Bytes;
 use move_binary_format::{
@@ -17,25 +13,19 @@ use move_binary_format::{
     CompiledModule,
 };
 use move_core_types::{
-    account_address::AccountAddress,
-    effects::{ChangeSet, Changes},
-    gas_algebra::NumBytes,
-    identifier::IdentStr,
-    language_storage::{ModuleId, TypeTag},
-    metadata::Metadata,
-    value::MoveTypeLayout,
+    account_address::AccountAddress, effects::{ChangeSet, Changes}, gas_algebra::NumBytes, identifier::IdentStr, language_storage::{ModuleId, TypeTag}, metadata::Metadata, resolver::MoveResolver, value::MoveTypeLayout
 };
 use move_vm_types::{
     gas::GasMeter,
-    loaded_data::runtime_types::{StructNameIndex, StructType, Type},
+    loaded_data::runtime_types::{Checksum, StructIdentifier, StructType, Type},
     values::{GlobalValue, Value},
 };
 use std::{borrow::Borrow, sync::Arc};
 
 pub struct Session<'r, 'l> {
-    pub(crate) loader: Loader,
-    pub(crate) move_vm: &'l MoveVM,
+    pub(crate) runtime: &'l VMRuntime,
     pub(crate) data_cache: TransactionDataCache<'r>,
+    pub(crate) session_cache: SessionCache<'r>,
     pub(crate) native_extensions: NativeContextExtensions<'r>,
 }
 
@@ -51,6 +41,18 @@ pub struct SerializedReturnValues {
 }
 
 impl<'r, 'l> Session<'r, 'l> {
+    pub fn new(
+        runtime: &'l VMRuntime, 
+        remote: &'r impl MoveResolver<PartialVMError>, 
+        extensions: NativeContextExtensions<'r>
+    ) -> Self {
+        Session {
+            runtime, 
+            data_cache: TransactionDataCache::new(remote),
+            session_cache: SessionCache::new(remote),
+            native_extensions: extensions,
+        }
+    }
     /// Execute a Move function with the given arguments. This is mainly designed for an external
     /// environment to invoke system logic written in Move.
     ///
@@ -85,13 +87,13 @@ impl<'r, 'l> Session<'r, 'l> {
         gas_meter: &mut impl GasMeter,
     ) -> VMResult<SerializedReturnValues> {
         let bypass_declared_entry_check = false;
-        self.move_vm.runtime.execute_function(
+        self.runtime.execute_function(
             module,
             function_name,
             ty_args,
             args,
-            &self.loader,
             &mut self.data_cache,
+            &self.session_cache,
             gas_meter,
             &mut self.native_extensions,
             bypass_declared_entry_check,
@@ -108,13 +110,13 @@ impl<'r, 'l> Session<'r, 'l> {
         gas_meter: &mut impl GasMeter,
     ) -> VMResult<SerializedReturnValues> {
         let bypass_declared_entry_check = true;
-        self.move_vm.runtime.execute_function(
+        self.runtime.execute_function(
             module,
             function_name,
             ty_args,
             args,
-            &self.loader,
             &mut self.data_cache,
+            &self.session_cache,
             gas_meter,
             &mut self.native_extensions,
             bypass_declared_entry_check,
@@ -128,12 +130,12 @@ impl<'r, 'l> Session<'r, 'l> {
         args: Vec<impl Borrow<[u8]>>,
         gas_meter: &mut impl GasMeter,
     ) -> VMResult<SerializedReturnValues> {
-        self.move_vm.runtime.execute_function_instantiation(
+        self.runtime.execute_function_instantiation(
             func,
             instantiation,
             args,
-            &self.loader,
             &mut self.data_cache,
+            &self.session_cache,
             gas_meter,
             &mut self.native_extensions,
             true,
@@ -163,12 +165,12 @@ impl<'r, 'l> Session<'r, 'l> {
         args: Vec<impl Borrow<[u8]>>,
         gas_meter: &mut impl GasMeter,
     ) -> VMResult<SerializedReturnValues> {
-        self.move_vm.runtime.execute_script(
+        self.runtime.execute_script(
             script,
             ty_args,
             args,
-            &self.loader,
             &mut self.data_cache,
+            &self.session_cache,
             gas_meter,
             &mut self.native_extensions,
         )
@@ -217,11 +219,12 @@ impl<'r, 'l> Session<'r, 'l> {
         sender: AccountAddress,
         gas_meter: &mut impl GasMeter,
     ) -> VMResult<()> {
-        self.move_vm.runtime.publish_module_bundle(
+        self.runtime.publish_module_bundle(
             modules,
             sender,
-            &self.loader,
+            
             &mut self.data_cache,
+            &mut self.session_cache,
             gas_meter,
             Compatibility::full_check(),
         )
@@ -235,11 +238,12 @@ impl<'r, 'l> Session<'r, 'l> {
         gas_meter: &mut impl GasMeter,
         compat_config: Compatibility,
     ) -> VMResult<()> {
-        self.move_vm.runtime.publish_module_bundle(
+        self.runtime.publish_module_bundle(
             modules,
             sender,
-            &self.loader,
+            
             &mut self.data_cache,
+            &mut self.session_cache,
             gas_meter,
             compat_config,
         )
@@ -251,11 +255,12 @@ impl<'r, 'l> Session<'r, 'l> {
         sender: AccountAddress,
         gas_meter: &mut impl GasMeter,
     ) -> VMResult<()> {
-        self.move_vm.runtime.publish_module_bundle(
+        self.runtime.publish_module_bundle(
             modules,
             sender,
-            &self.loader,
+            
             &mut self.data_cache,
+            &mut self.session_cache,
             gas_meter,
             Compatibility::no_check(),
         )
@@ -272,16 +277,20 @@ impl<'r, 'l> Session<'r, 'l> {
     /// This MUST NOT be called if there is a previous invocation that failed with an invariant violation.
     pub fn finish(self) -> VMResult<ChangeSet> {
         self.data_cache
-            .into_effects(&self.loader)
+            .into_effects( &self.runtime.loader, &self.session_cache)
             .map_err(|e| e.finish(Location::Undefined))
     }
 
     pub fn finish_with_custom_effects<Resource>(
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
-    ) -> VMResult<Changes<Bytes, [u8; 32], Resource>> {
+    ) -> VMResult<Changes<Bytes, Checksum, Resource>> {
         self.data_cache
-            .into_custom_effects(resource_converter, &self.loader)
+            .into_custom_effects(
+                resource_converter,
+                &self.runtime.loader,
+                &self.session_cache,
+            )
             .map_err(|e| e.finish(Location::Undefined))
     }
 
@@ -293,16 +302,17 @@ impl<'r, 'l> Session<'r, 'l> {
             ..
         } = self;
         let change_set = data_cache
-            .into_effects(&self.loader)
+            .into_effects(&self.runtime.loader, &self.session_cache)
             .map_err(|e| e.finish(Location::Undefined))?;
         Ok((change_set, native_extensions))
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn finish_with_extensions_with_custom_effects<Resource>(
         self,
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
     ) -> VMResult<(
-        Changes<Bytes, [u8; 32], Resource>,
+        Changes<Bytes, Checksum, Resource>,
         NativeContextExtensions<'r>,
     )> {
         let Session {
@@ -311,25 +321,28 @@ impl<'r, 'l> Session<'r, 'l> {
             ..
         } = self;
         let change_set = data_cache
-            .into_custom_effects(resource_converter, &self.loader)
+            .into_custom_effects(
+                resource_converter,
+                &self.runtime.loader,
+                &self.session_cache,
+            )
             .map_err(|e| e.finish(Location::Undefined))?;
         Ok((change_set, native_extensions))
     }
 
-    /// Same like `finish`, but also extracts the native context extensions from the session.
-    pub fn finish_with_extensions_with_loader(
+    pub fn finish_with_extensions_with_session_cache(
         self,
-    ) -> VMResult<(ChangeSet, NativeContextExtensions<'r>, Loader)> {
+    ) -> VMResult<(ChangeSet, SessionCache<'r>, NativeContextExtensions<'r>)> {
         let Session {
             data_cache,
+            session_cache,
             native_extensions,
-            loader,
             ..
         } = self;
         let change_set = data_cache
-            .into_effects(&loader)
+            .into_effects( &self.runtime.loader,&session_cache)
             .map_err(|e| e.finish(Location::Undefined))?;
-        Ok((change_set, native_extensions, loader))
+        Ok((change_set, session_cache, native_extensions))
     }
 
     /// Try to load a resource from remote storage and create a corresponding GlobalValue
@@ -339,19 +352,20 @@ impl<'r, 'l> Session<'r, 'l> {
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<(&mut GlobalValue, Option<NumBytes>)> {
-        self.data_cache.load_resource(&self.loader, addr, ty)
+        self.data_cache
+            .load_resource( &self.runtime.loader,&self.session_cache, addr, ty)
     }
 
     /// Get the serialized format of a `CompiledModule` given a `ModuleId`.
     pub fn load_module_bytes(&self, module_id: &ModuleId) -> VMResult<Bytes> {
-        self.data_cache
+        self.session_cache
             .load_module(module_id)
             .map_err(|e| e.finish(Location::Undefined))
     }
 
     /// Check if this module exists.
     pub fn exists_module(&self, module_id: &ModuleId) -> VMResult<bool> {
-        self.data_cache.exists_module(module_id)
+        self.session_cache.exists_module(module_id)
     }
 
     /// Load a script and all of its types into cache
@@ -360,9 +374,12 @@ impl<'r, 'l> Session<'r, 'l> {
         script: impl Borrow<[u8]>,
         ty_args: Vec<TypeTag>,
     ) -> VMResult<LoadedFunctionInstantiation> {
-        let (_, instantiation) =
-            self.loader
-                .load_script(script.borrow(), &ty_args, &self.data_cache)?;
+        let (_, instantiation) = self.runtime.loader.load_script(
+            script.borrow(),
+            &ty_args,
+            &self.session_cache,
+            &self.session_cache,
+        )?;
         Ok(instantiation)
     }
 
@@ -373,12 +390,16 @@ impl<'r, 'l> Session<'r, 'l> {
         function_name: &IdentStr,
         expected_return_type: &Type,
     ) -> VMResult<(LoadedFunction, LoadedFunctionInstantiation)> {
-        let (func, instantiation) = self.loader.load_function_with_type_arg_inference(
-            module_id,
-            function_name,
-            expected_return_type,
-            &self.data_cache,
-        )?;
+        let (func, instantiation) = self
+            .runtime
+            .loader
+            .load_function_with_type_arg_inference(
+                module_id,
+                function_name,
+                expected_return_type,
+                &self.session_cache,
+                &self.session_cache,
+            )?;
         Ok((func, instantiation))
     }
 
@@ -389,31 +410,34 @@ impl<'r, 'l> Session<'r, 'l> {
         function_name: &IdentStr,
         type_arguments: &[TypeTag],
     ) -> VMResult<LoadedFunctionInstantiation> {
-        let (_, _, instantiation) = self.loader.load_function(
+        let (_, _, instantiation) = self.runtime.loader.load_function(
             module_id,
             function_name,
             type_arguments,
-            &self.data_cache,
+            &self.session_cache,
+            &self.session_cache,
         )?;
         Ok(instantiation)
     }
 
     pub fn load_type(&self, type_tag: &TypeTag) -> VMResult<Type> {
-        self.loader.load_type(type_tag, &self.data_cache)
+        self.runtime
+            .loader
+            .load_type(type_tag, &self.session_cache, &self.session_cache)
     }
 
     pub fn get_type_layout(&self, type_tag: &TypeTag) -> VMResult<MoveTypeLayout> {
-        self.loader.get_type_layout(type_tag, &self.data_cache)
-    }
-
-    pub fn get_fully_annotated_type_layout(&self, type_tag: &TypeTag) -> VMResult<MoveTypeLayout> {
-        self.loader
-            .get_fully_annotated_type_layout(type_tag, &self.data_cache)
+        self.runtime.loader.get_type_layout(
+            type_tag,
+            &self.session_cache,
+            &self.session_cache,
+        )
     }
 
     pub fn get_type_tag(&self, ty: &Type) -> VMResult<TypeTag> {
-        self.loader
-            .type_to_type_tag(ty)
+        self.runtime
+            .loader
+            .type_to_type_tag(ty, &self.session_cache)
             .map_err(|e| e.finish(Location::Undefined))
     }
 
@@ -427,22 +451,22 @@ impl<'r, 'l> Session<'r, 'l> {
         &mut self.native_extensions
     }
 
-    pub fn get_move_vm(&self) -> &'l MoveVM {
-        self.move_vm
-    }
-
     pub fn get_vm_config(&self) -> &'l VMConfig {
-        &self.move_vm.vm_config
+        &self.runtime.loader.vm_config
     }
 
-    pub fn get_struct_type(&self, index: StructNameIndex) -> Option<Arc<StructType>> {
-        self.loader.get_struct_type_by_idx(index).ok()
+    pub fn get_struct_type(&self, id: &StructIdentifier) -> Option<Arc<StructType>> {
+        self.runtime
+            .loader
+            .get_struct_type_by_identifier(id, &self.session_cache)
+            .ok()
     }
 
     /// Load a module into VM's code cache
     pub fn load_module(&self, module_id: &ModuleId) -> VMResult<Arc<CompiledModule>> {
-        self.loader
-            .load_module(module_id, &self.data_cache)
+        self.runtime
+            .loader
+            .load_module(module_id, &self.session_cache, &self.session_cache)
             .map(|arc_module| arc_module.arc_module())
     }
 
@@ -459,11 +483,27 @@ impl<'r, 'l> Session<'r, 'l> {
     ///
     /// TODO: in the new loader architecture, as the loader is visible to the adapter, one would
     ///   call this directly via the loader instead of the VM.
-    pub fn with_module_metadata<T, F>(&self, module: &ModuleId, f: F) -> Option<T>
+    pub fn with_module_metadata<T, F>(
+        &self,
+        module_id: &ModuleId,
+        f: F,
+    ) -> PartialVMResult<Option<T>>
     where
         F: FnOnce(&[Metadata]) -> Option<T>,
     {
-        f(&self.loader.get_module(module)?.module().metadata)
+        Ok(self
+            .runtime
+            .loader
+            .get_module(module_id, &self.session_cache)?
+            .and_then(|v| f(&v.compiled_module().metadata)))
+    }
+
+    pub fn load_module_from_cache(&self, module_id: &ModuleId) -> Option<Bytes> {
+        self.session_cache.load_module_from_cache(module_id)
+    }
+
+    pub fn load_checksum_from_cache(&self, module_id: &ModuleId) -> Option<Checksum> {
+        self.session_cache.load_checksum_from_cache(module_id)
     }
 }
 

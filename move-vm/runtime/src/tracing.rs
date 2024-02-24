@@ -6,6 +6,7 @@
 use crate::debug::DebugContext;
 #[cfg(any(debug_assertions, feature = "debugging"))]
 use crate::{
+    session_cache::SessionCache,
     interpreter::Interpreter,
     loader::{Function, Loader},
 };
@@ -73,6 +74,7 @@ pub(crate) fn trace(
     pc: u16,
     instr: &Bytecode,
     loader: &Loader,
+    checksum_store: &SessionCache,
     interp: &Interpreter,
 ) {
     if *TRACING_ENABLED {
@@ -85,16 +87,21 @@ pub(crate) fn trace(
         }
     }
     if *DEBUGGING_ENABLED {
-        DEBUG_CONTEXT
-            .lock()
-            .unwrap()
-            .debug_loop(function_desc, locals, pc, instr, loader, interp);
+        DEBUG_CONTEXT.lock().unwrap().debug_loop(
+            function_desc,
+            locals,
+            pc,
+            instr,
+            loader,
+            checksum_store,
+            interp,
+        );
     }
 }
 
 #[macro_export]
 macro_rules! trace {
-    ($function_desc:expr, $locals:expr, $pc:expr, $instr:tt, $resolver:expr, $interp:expr) => {
+    ($function_desc:expr, $locals:expr, $pc:expr, $instr:tt, $resolver:expr, $checksum_store:expr, $interp:expr) => {
         // Only include this code in debug releases
         #[cfg(any(debug_assertions, feature = "debugging"))]
         $crate::tracing::trace(
@@ -103,6 +110,7 @@ macro_rules! trace {
             $pc,
             &$instr,
             $resolver.loader(),
+            $checksum_store,
             $interp,
         )
     };

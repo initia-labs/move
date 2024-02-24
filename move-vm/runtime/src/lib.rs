@@ -17,8 +17,9 @@ pub mod logging;
 pub mod move_vm;
 pub mod native_extensions;
 pub mod native_functions;
-mod runtime;
+pub mod runtime;
 pub mod session;
+pub mod session_cache;
 #[macro_use]
 pub mod tracing;
 pub mod config;

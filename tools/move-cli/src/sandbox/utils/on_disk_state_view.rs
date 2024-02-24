@@ -26,6 +26,7 @@ use move_core_types::{
 use move_disassembler::disassembler::Disassembler;
 use move_ir_types::location::Spanned;
 use move_resource_viewer::{AnnotatedMoveStruct, MoveValueAnnotator};
+use sha3::{Digest, Sha3_256};
 use std::{
     fmt::Debug,
     fs,
@@ -287,6 +288,15 @@ impl OnDiskStateView {
         Ok(fs::write(path, module_bytes)?)
     }
 
+    /// Save `checksum` on disk under the path `checksum.address()`/`checksum.name()`
+    pub fn save_checksum(&self, module_id: &ModuleId, checksum: &[u8; 32]) -> Result<()> {
+        let path = self.get_checksum_path(module_id);
+        if !path.exists() {
+            fs::create_dir_all(path.parent().unwrap())?
+        }
+        Ok(fs::write(path, checksum.to_vec())?)
+    }
+
     /// Save the YAML encoding `layout` on disk under `build_dir/layouts/id`.
     pub fn save_struct_layouts(&self, layouts: &str) -> Result<()> {
         let layouts_file = self.struct_layouts_file();
@@ -303,6 +313,13 @@ impl OnDiskStateView {
     ) -> Result<()> {
         for (module_id, module_bytes) in modules {
             self.save_module(module_id, module_bytes)?;
+
+            // compute checksum
+            let mut sha3_256 = Sha3_256::new();
+            sha3_256.update(module_bytes);
+            let checksum: [u8; 32] = sha3_256.finalize().into();
+
+            self.save_checksum(module_id, &checksum)?;
         }
         Ok(())
     }
@@ -354,7 +371,7 @@ impl OnDiskStateView {
 impl ModuleResolver for OnDiskStateView {
     type Error = PartialVMError;
 
-    fn get_module_checksum(
+    fn get_checksum(
         &self,
         module_id: &ModuleId,
     ) -> std::prelude::v1::Result<Option<[u8; 32]>, Self::Error> {

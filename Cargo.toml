@@ -2,8 +2,8 @@
 resolver = "2"
 
 members = [
-    "extensions/async/move-async-vm",
-    "extensions/move-table-extension",
+    # "extensions/async/move-async-vm",
+    # "extensions/move-table-extension",
     "move-analyzer",
     "move-binary-format",
     "move-binary-format/serializer-tests",

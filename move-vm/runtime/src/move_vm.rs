@@ -3,24 +3,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    config::VMConfig,
-    data_cache::TransactionDataCache,
-    loader::Loader,
-    native_extensions::NativeContextExtensions,
-    native_functions::{NativeFunction, NativeFunctions},
-    runtime::VMRuntime,
-    session::Session,
+    config::VMConfig, data_cache::TransactionDataCache, native_extensions::NativeContextExtensions,
+    native_functions::NativeFunction, runtime::VMRuntime, session::Session,
+    session_cache::SessionCache,
 };
 use move_binary_format::errors::{Location, PartialVMError, VMResult};
 use move_core_types::{
-    account_address::AccountAddress, identifier::Identifier, resolver::MoveResolver,
+    account_address::AccountAddress, identifier::Identifier, language_storage::TypeTag,
+    resolver::MoveResolver, value::MoveTypeLayout,
 };
 
-#[derive(Clone)]
 pub struct MoveVM {
     pub(crate) runtime: VMRuntime,
-    pub(crate) natives: NativeFunctions,
-    pub(crate) vm_config: VMConfig,
 }
 
 impl MoveVM {
@@ -35,10 +29,8 @@ impl MoveVM {
         vm_config: VMConfig,
     ) -> VMResult<Self> {
         Ok(Self {
-            runtime: VMRuntime::new(),
-            natives: NativeFunctions::new(natives)
+            runtime: VMRuntime::new(natives, vm_config)
                 .map_err(|err| err.finish(Location::Undefined))?,
-            vm_config,
         })
     }
 
@@ -70,10 +62,28 @@ impl MoveVM {
         native_extensions: NativeContextExtensions<'r>,
     ) -> Session<'r, '_> {
         Session {
-            move_vm: self,
+            runtime: &self.runtime,
             data_cache: TransactionDataCache::new(remote),
+            session_cache: SessionCache::new(remote),
             native_extensions,
-            loader: Loader::new(self.natives.clone(), self.vm_config.clone()),
         }
+    }
+
+    pub fn get_fully_annotated_type_layout(
+        &self,
+        session_cache: &SessionCache,
+        type_tag: &TypeTag,
+    ) -> VMResult<MoveTypeLayout> {
+        self.runtime
+            .loader
+            .get_fully_annotated_type_layout(type_tag, session_cache, session_cache)
+    }
+
+    pub fn flush_unused_module_cache(&self) {
+        self.runtime.flush_unused_module_cache()
+    }
+
+    pub fn flush_unused_script_cache(&self) {
+        self.runtime.flush_unused_script_cache()
     }
 }

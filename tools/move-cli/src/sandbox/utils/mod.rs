@@ -546,6 +546,7 @@ pub(crate) fn explain_execution_error(
             status_code: LINKER_ERROR,
             ..
         } => {
+
             // TODO: is this the only reason we can see LINKER_ERROR?
             // Can we also see it if someone manually deletes modules in storage?
             println!(

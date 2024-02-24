@@ -25,7 +25,7 @@ use std::fmt::Debug;
 pub trait ModuleResolver {
     type Error: Debug;
 
-    fn get_module_checksum(&self, module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error>;
+    fn get_checksum(&self, module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error>;
 
     fn get_module_metadata(&self, module_id: &ModuleId) -> Vec<Metadata>;
 

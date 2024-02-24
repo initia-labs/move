@@ -1,25 +1,21 @@
-// Copyright (c) The Diem Core Contributors
-// Copyright (c) The Move Contributors
-// SPDX-License-Identifier: Apache-2.0
-
-use crate::{
-    loader::{Loader, Module, Resolver, ScriptHash},
-    native_functions::{NativeFunction, NativeFunctions, UnboxedNativeFunction},
-};
 use move_binary_format::{
     access::ModuleAccess,
     errors::{PartialVMError, PartialVMResult},
     file_format::{AbilitySet, Bytecode, CompiledModule, FunctionDefinitionIndex, Visibility},
 };
 use move_core_types::{identifier::Identifier, language_storage::ModuleId, vm_status::StatusCode};
-use move_vm_types::loaded_data::runtime_types::Type;
+use move_vm_types::loaded_data::runtime_types::{Checksum, Type};
 use std::{fmt::Debug, sync::Arc};
+
+use crate::native_functions::{NativeFunction, NativeFunctions, UnboxedNativeFunction};
+
+use super::{module::Module, resolver::Resolver, ChecksumStorage, Loader};
 
 // A simple wrapper for the "owner" of the function (Module or Script)
 #[derive(Clone, Debug)]
 pub(crate) enum Scope {
     Module(ModuleId),
-    Script(ScriptHash),
+    Script(Checksum),
 }
 
 // A runtime function
@@ -64,7 +60,7 @@ impl Function {
         index: FunctionDefinitionIndex,
         module: &CompiledModule,
         signature_table: &[Vec<Type>],
-    ) -> Self {
+    ) -> PartialVMResult<Self> {
         let def = module.function_def_at(index);
         let handle = module.function_handle_at(def.function);
         let name = module.identifier_at(handle.name).to_owned();
@@ -85,12 +81,15 @@ impl Function {
         } else {
             (None, false)
         };
+
         let scope = Scope::Module(module_id);
+
         // Native functions do not have a code unit
         let code = match &def.code {
             Some(code) => code.code.clone(),
             None => vec![],
         };
+
         let type_parameters = handle.type_parameters.clone();
         let return_types = signature_table[handle.return_.0 as usize].clone();
         let local_types = if let Some(code) = &def.code {
@@ -103,7 +102,7 @@ impl Function {
 
         let parameter_types = signature_table[handle.parameters.0 as usize].clone();
 
-        Self {
+        Ok(Self {
             file_format_version: module.version(),
             index,
             code,
@@ -116,7 +115,7 @@ impl Function {
             local_types,
             return_types,
             parameter_types,
-        }
+        })
     }
 
     #[allow(unused)]
@@ -126,7 +125,7 @@ impl Function {
 
     pub(crate) fn module_id(&self) -> Option<&ModuleId> {
         match &self.scope {
-            Scope::Module(module_id) => Some(module_id),
+            Scope::Module(id) => Some(id),
             Scope::Script(_) => None,
         }
     }
@@ -135,18 +134,23 @@ impl Function {
         self.index
     }
 
-    pub(crate) fn get_resolver<'a>(&self, loader: &'a Loader) -> Resolver<'a> {
+    pub(crate) fn get_resolver<'a>(
+        &self,
+        loader: &'a Loader,
+        checksum_storage: &dyn ChecksumStorage,
+    ) -> Resolver<'a> {
         match &self.scope {
             Scope::Module(module_id) => {
                 let module = loader
-                    .get_module(module_id)
+                    .get_module(module_id, checksum_storage)
+                    .expect("ModuleId on Function must exist")
                     .expect("ModuleId on Function must exist");
                 Resolver::for_module(loader, module)
-            },
+            }
             Scope::Script(script_hash) => {
                 let script = loader.get_script(script_hash);
                 Resolver::for_script(loader, script)
-            },
+            }
         }
     }
 
@@ -233,5 +237,8 @@ pub(crate) struct FunctionInstantiation {
 #[derive(Clone, Debug)]
 pub(crate) enum FunctionHandle {
     Local(Arc<Function>),
-    Remote { module: ModuleId, name: Identifier },
+    Remote {
+        module_id: ModuleId,
+        name: Identifier,
+    },
 }
