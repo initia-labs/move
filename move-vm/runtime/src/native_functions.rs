@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    data_cache::TransactionDataCache, interpreter::Interpreter, loader::Resolver,
-    native_extensions::NativeContextExtensions,
+    session_cache::SessionCache, data_cache::TransactionDataCache,
+    interpreter::Interpreter, loader::Resolver, native_extensions::NativeContextExtensions,
 };
 use move_binary_format::errors::{
     ExecutionState, Location, PartialVMError, PartialVMResult, VMResult,
@@ -93,18 +93,20 @@ impl NativeFunctions {
     }
 }
 
-pub struct NativeContext<'a, 'b, 'c> {
+pub struct NativeContext<'a, 'b, 'c, 'd> {
     interpreter: &'a mut Interpreter,
     data_store: &'a mut TransactionDataCache<'c>,
+    checksum_store: &'a SessionCache<'d>,
     resolver: &'a Resolver<'a>,
     extensions: &'a mut NativeContextExtensions<'b>,
     gas_balance: InternalGas,
 }
 
-impl<'a, 'b, 'c> NativeContext<'a, 'b, 'c> {
+impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
     pub(crate) fn new(
         interpreter: &'a mut Interpreter,
         data_store: &'a mut TransactionDataCache<'c>,
+        checksum_store: &'a SessionCache<'d>,
         resolver: &'a Resolver<'a>,
         extensions: &'a mut NativeContextExtensions<'b>,
         gas_balance: InternalGas,
@@ -112,6 +114,7 @@ impl<'a, 'b, 'c> NativeContext<'a, 'b, 'c> {
         Self {
             interpreter,
             data_store,
+            checksum_store,
             resolver,
             extensions,
             gas_balance,
@@ -119,10 +122,10 @@ impl<'a, 'b, 'c> NativeContext<'a, 'b, 'c> {
     }
 }
 
-impl<'a, 'b, 'c> NativeContext<'a, 'b, 'c> {
+impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
     pub fn print_stack_trace<B: Write>(&self, buf: &mut B) -> PartialVMResult<()> {
         self.interpreter
-            .debug_print_stack_trace(buf, self.resolver.loader())
+            .debug_print_stack_trace(buf, self.resolver.loader(), self.checksum_store)
     }
 
     pub fn exists_at(
@@ -132,12 +135,7 @@ impl<'a, 'b, 'c> NativeContext<'a, 'b, 'c> {
     ) -> VMResult<(bool, Option<NumBytes>)> {
         let (value, num_bytes) = self
             .data_store
-            .load_resource(
-                self.resolver.loader(),
-                address,
-                type_,
-                self.resolver.module_store(),
-            )
+            .load_resource(self.resolver.loader(), self.checksum_store, address, type_)
             .map_err(|err| err.finish(Location::Undefined))?;
         let exists = value
             .exists()
@@ -146,11 +144,13 @@ impl<'a, 'b, 'c> NativeContext<'a, 'b, 'c> {
     }
 
     pub fn type_to_type_tag(&self, ty: &Type) -> PartialVMResult<TypeTag> {
-        self.resolver.loader().type_to_type_tag(ty)
+        self.resolver
+            .loader()
+            .type_to_type_tag(ty, self.checksum_store)
     }
 
     pub fn type_to_type_layout(&self, ty: &Type) -> PartialVMResult<MoveTypeLayout> {
-        self.resolver.type_to_type_layout(ty)
+        self.resolver.type_to_type_layout(ty, self.checksum_store)
     }
 
     pub fn type_to_type_layout_with_identifier_mappings(
@@ -158,11 +158,12 @@ impl<'a, 'b, 'c> NativeContext<'a, 'b, 'c> {
         ty: &Type,
     ) -> PartialVMResult<(MoveTypeLayout, bool)> {
         self.resolver
-            .type_to_type_layout_with_identifier_mappings(ty)
+            .type_to_type_layout_with_identifier_mappings(ty, self.checksum_store)
     }
 
     pub fn type_to_fully_annotated_layout(&self, ty: &Type) -> PartialVMResult<MoveTypeLayout> {
-        self.resolver.type_to_fully_annotated_layout(ty)
+        self.resolver
+            .type_to_fully_annotated_layout(ty, self.checksum_store)
     }
 
     pub fn extensions(&self) -> &NativeContextExtensions<'b> {

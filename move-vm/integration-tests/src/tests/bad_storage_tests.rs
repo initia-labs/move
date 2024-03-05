@@ -512,6 +512,10 @@ struct BogusStorage {
 impl ModuleResolver for BogusStorage {
     type Error = PartialVMError;
 
+    fn get_checksum(&self, _module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
+        Err(PartialVMError::new(self.bad_status_code))
+    }
+
     fn get_module_metadata(&self, _module_id: &ModuleId) -> Vec<Metadata> {
         vec![]
     }

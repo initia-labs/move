@@ -21,6 +21,8 @@ use std::{
     fmt::Debug,
 };
 
+use sha3::{Digest, Sha3_256};
+
 /// A dummy storage containing no modules or resources.
 #[derive(Debug, Clone)]
 pub struct BlankStorage;
@@ -36,6 +38,10 @@ impl ModuleResolver for BlankStorage {
 
     fn get_module_metadata(&self, _module_id: &ModuleId) -> Vec<Metadata> {
         vec![]
+    }
+
+    fn get_checksum(&self, _module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
+        Ok(None)
     }
 
     fn get_module(&self, _module_id: &ModuleId) -> Result<Option<Bytes>, Self::Error> {
@@ -82,6 +88,22 @@ impl<'a, 'b, S: ModuleResolver> ModuleResolver for DeltaStorage<'a, 'b, S> {
 
     fn get_module_metadata(&self, _module_id: &ModuleId) -> Vec<Metadata> {
         vec![]
+    }
+
+    fn get_checksum(&self, module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
+        if let Some(account_storage) = self.change_set.accounts().get(module_id.address()) {
+            if let Some(blob_op) = account_storage.modules().get(module_id.name()) {
+                return Ok(blob_op.map_ref(|blob| {
+                    let mut sha3_256 = Sha3_256::new();
+                    sha3_256.update(&blob);
+                    let checksum: [u8; 32] = sha3_256.finalize().into();
+
+                    checksum
+                }).ok())
+            }
+        }
+
+        self.base.get_checksum(module_id)
     }
 
     fn get_module(&self, module_id: &ModuleId) -> Result<Option<Bytes>, Self::Error> {
@@ -310,6 +332,24 @@ impl InMemoryStorage {
 
 impl ModuleResolver for InMemoryStorage {
     type Error = PartialVMError;
+
+    fn get_checksum(&self, module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
+        if let Some(account_storage) = self.accounts.get(module_id.address()) {
+            match account_storage.modules.get(module_id.name()) {
+                Some(blob) => {
+                    let mut sha3_256 = Sha3_256::new();
+                    sha3_256.update(&blob);
+                    let checksum: [u8; 32] = sha3_256.finalize().into();
+
+                    return Ok(Some(checksum));
+                },
+                None => {
+                    return Ok(None);
+                },
+            }
+        }
+        Ok(None)
+    }
 
     fn get_module_metadata(&self, _module_id: &ModuleId) -> Vec<Metadata> {
         vec![]

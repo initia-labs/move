@@ -26,6 +26,7 @@ use move_core_types::{
 use move_disassembler::disassembler::Disassembler;
 use move_ir_types::location::Spanned;
 use move_resource_viewer::{AnnotatedMoveStruct, MoveValueAnnotator};
+use sha3::{Digest, Sha3_256};
 use std::{
     fmt::Debug,
     fs,
@@ -36,6 +37,8 @@ use std::{
 pub const RESOURCES_DIR: &str = "resources";
 /// subdirectory of `DEFAULT_STORAGE_DIR/<addr>` where modules are stored
 pub const MODULES_DIR: &str = "modules";
+/// subdirectory of `DEFAULT_STORAGE_DIR/<addr>` where checksums are stored
+pub const CHECKSUMS_DIR: &str = "checksums";
 
 /// file under `DEFAULT_BUILD_DIR` where a registry of generated struct layouts are stored
 pub const STRUCT_LAYOUTS_FILE: &str = "struct_layouts.yaml";
@@ -115,6 +118,13 @@ impl OnDiskStateView {
         path.with_extension(MOVE_COMPILED_EXTENSION)
     }
 
+    fn get_checksum_path(&self, module_id: &ModuleId) -> PathBuf {
+        let mut path = self.get_addr_path(module_id.address());
+        path.push(CHECKSUMS_DIR);
+        path.push(module_id.name().to_string());
+        path.with_extension(MOVE_COMPILED_EXTENSION)
+    }
+
     /// Extract a module ID from a path
     pub fn get_module_id(&self, p: &Path) -> Option<ModuleId> {
         if !self.is_module_path(p) {
@@ -144,6 +154,11 @@ impl OnDiskStateView {
     /// Read the resource bytes stored on-disk at `addr`/`tag`
     fn get_module_bytes(&self, module_id: &ModuleId) -> Result<Option<Bytes>> {
         Self::get_bytes(&self.get_module_path(module_id))
+    }
+
+    /// Read the resource bytes stored on-disk at `addr`/`tag`
+    fn get_checksum_bytes(&self, module_id: &ModuleId) -> Result<Option<Bytes>> {
+        Self::get_bytes(&self.get_checksum_path(module_id))
     }
 
     /// Check if a module at `addr`/`module_id` exists
@@ -273,6 +288,15 @@ impl OnDiskStateView {
         Ok(fs::write(path, module_bytes)?)
     }
 
+    /// Save `checksum` on disk under the path `checksum.address()`/`checksum.name()`
+    pub fn save_checksum(&self, module_id: &ModuleId, checksum: &[u8; 32]) -> Result<()> {
+        let path = self.get_checksum_path(module_id);
+        if !path.exists() {
+            fs::create_dir_all(path.parent().unwrap())?
+        }
+        Ok(fs::write(path, checksum.to_vec())?)
+    }
+
     /// Save the YAML encoding `layout` on disk under `build_dir/layouts/id`.
     pub fn save_struct_layouts(&self, layouts: &str) -> Result<()> {
         let layouts_file = self.struct_layouts_file();
@@ -289,6 +313,13 @@ impl OnDiskStateView {
     ) -> Result<()> {
         for (module_id, module_bytes) in modules {
             self.save_module(module_id, module_bytes)?;
+
+            // compute checksum
+            let mut sha3_256 = Sha3_256::new();
+            sha3_256.update(module_bytes);
+            let checksum: [u8; 32] = sha3_256.finalize().into();
+
+            self.save_checksum(module_id, &checksum)?;
         }
         Ok(())
     }
@@ -339,6 +370,23 @@ impl OnDiskStateView {
 
 impl ModuleResolver for OnDiskStateView {
     type Error = PartialVMError;
+
+    fn get_checksum(
+        &self,
+        module_id: &ModuleId,
+    ) -> std::prelude::v1::Result<Option<[u8; 32]>, Self::Error> {
+        self.get_checksum_bytes(module_id)
+            .map_err(|e| {
+                PartialVMError::new(StatusCode::STORAGE_ERROR)
+                    .with_message(format!("Storage error: {:?}", e))
+            })
+            .map(|v| {
+                v.map(|v| {
+                    let vec: Vec<u8> = v.into();
+                    vec.try_into().unwrap()
+                })
+            })
+    }
 
     fn get_module_metadata(&self, _module_id: &ModuleId) -> Vec<Metadata> {
         vec![]

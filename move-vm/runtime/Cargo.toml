@@ -16,7 +16,7 @@ bytes = "1.4.0"
 fail = "0.4.0"
 hashbrown = "0.14.3"
 lazy_static = "1.4.0"
-lru = "0.7.5"
+lru = "0.12.3"
 move-binary-format = { path = "../../move-binary-format" }
 once_cell = "1.7.2"
 parking_lot = "0.11.1"

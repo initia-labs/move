@@ -5,6 +5,7 @@
 use crate::{
     interpreter::Interpreter,
     loader::{Function, Loader},
+    session_cache::SessionCache,
 };
 use move_binary_format::file_format::Bytecode;
 use move_vm_types::values::{self, Locals};
@@ -98,13 +99,15 @@ impl DebugContext {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn debug_loop(
         &mut self,
         function_desc: &Function,
         locals: &Locals,
         pc: u16,
         instr: &Bytecode,
-        resolver: &Loader,
+        loader: &Loader,
+        checksum_store: &SessionCache,
         interp: &Interpreter,
     ) {
         let instr_string = format!("{:?}", instr);
@@ -162,7 +165,9 @@ impl DebugContext {
                                 .for_each(|(i, bp)| println!("[{}] {}", i, bp)),
                             DebugCommand::PrintStack => {
                                 let mut s = String::new();
-                                interp.debug_print_stack_trace(&mut s, resolver).unwrap();
+                                interp
+                                    .debug_print_stack_trace(&mut s, loader, checksum_store)
+                                    .unwrap();
                                 println!("{}", s);
                                 println!("Current frame: {}\n", function_string);
                                 let code = function_desc.code();

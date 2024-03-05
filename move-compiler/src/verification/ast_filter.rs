@@ -68,7 +68,9 @@ fn verification_attributes(
                 KnownAttribute::Verification(verify_attr) => Some((attr.loc, verify_attr)),
                 KnownAttribute::Testing(_)
                 | KnownAttribute::Native(_)
-                | KnownAttribute::Deprecation(_) => None,
+                | KnownAttribute::Deprecation(_)
+                | KnownAttribute::View(_)
+                | KnownAttribute::Event(_) => None,
             },
         )
         .collect()

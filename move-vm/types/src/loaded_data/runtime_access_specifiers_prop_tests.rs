@@ -125,7 +125,7 @@ fn type_args_strategy() -> impl Strategy<Value = Vec<Type>> {
 
 fn struct_id_strategy() -> impl Strategy<Value = StructIdentifier> {
     (module_id_strategy(), identifier_strategy())
-        .prop_map(|(module, name)| StructIdentifier { module, name })
+        .prop_map(|(module_id, name)| StructIdentifier { module_id, name })
 }
 
 fn module_id_strategy() -> impl Strategy<Value = ModuleId> {
@@ -171,8 +171,8 @@ fn resource_to_matching_specifier(
     resources.prop_flat_map(|(s, ts)| {
         prop_oneof![
             Just(ResourceSpecifier::Any),
-            Just(ResourceSpecifier::DeclaredAtAddress(s.module.address)),
-            Just(ResourceSpecifier::DeclaredInModule(s.module.clone())),
+            Just(ResourceSpecifier::DeclaredAtAddress(s.module_id.address)),
+            Just(ResourceSpecifier::DeclaredInModule(s.module_id.clone())),
             Just(ResourceSpecifier::Resource(s.clone())),
             Just(ResourceSpecifier::ResourceInstantiation(s, ts))
         ]

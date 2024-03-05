@@ -5,9 +5,10 @@
 use crate::{
     access_control::AccessControlState,
     data_cache::TransactionDataCache,
-    loader::{Function, Loader, ModuleStorageAdapter, Resolver},
+    loader::{SessionStorage, Function, Loader, Resolver},
     native_extensions::NativeContextExtensions,
     native_functions::NativeContext,
+    session_cache::SessionCache,
     trace,
 };
 use fail::fail_point;
@@ -67,18 +68,22 @@ pub(crate) struct Interpreter {
     access_control: AccessControlState,
 }
 
-struct TypeWithLoader<'a, 'b> {
+struct TypeWithLoader<'a, 'b, 'c> {
     ty: &'a Type,
     loader: &'b Loader,
+    session_storage: &'c dyn SessionStorage,
 }
 
-impl<'a, 'b> TypeView for TypeWithLoader<'a, 'b> {
+impl<'a, 'b, 'c> TypeView for TypeWithLoader<'a, 'b, 'c> {
     fn to_type_tag(&self) -> TypeTag {
-        self.loader.type_to_type_tag(self.ty).unwrap()
+        self.loader
+            .type_to_type_tag(self.ty, self.session_storage)
+            .unwrap()
     }
 }
 
 impl Interpreter {
+    #[allow(clippy::too_many_arguments)]
     /// Entrypoint into the interpreter. All external calls need to be routed through this
     /// function.
     pub(crate) fn entrypoint(
@@ -86,7 +91,7 @@ impl Interpreter {
         ty_args: Vec<Type>,
         args: Vec<Value>,
         data_store: &mut TransactionDataCache,
-        module_store: &ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         loader: &Loader,
@@ -100,7 +105,7 @@ impl Interpreter {
         .execute_main(
             loader,
             data_store,
-            module_store,
+            checksum_store,
             gas_meter,
             extensions,
             function,
@@ -109,6 +114,7 @@ impl Interpreter {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Main loop for the execution of a function.
     ///
     /// This function sets up a `Frame` and calls `execute_code_unit` to execute code of the
@@ -119,7 +125,7 @@ impl Interpreter {
         mut self,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        module_store: &ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         function: Arc<Function>,
@@ -140,17 +146,17 @@ impl Interpreter {
         }
 
         let mut current_frame = self
-            .make_new_frame(gas_meter, loader, module_store, function, ty_args, locals)
+            .make_new_frame(gas_meter, loader, checksum_store, function, ty_args, locals)
             .map_err(|err| self.set_location(err))?;
         // Access control for the new frame.
         self.access_control
             .enter_function(&current_frame, current_frame.function.as_ref())
             .map_err(|e| self.set_location(e))?;
         loop {
-            let resolver = current_frame.resolver(loader, module_store);
+            let resolver = current_frame.resolver(loader, checksum_store);
             let exit_code =
                 current_frame //self
-                    .execute_code(&resolver, &mut self, data_store, module_store, gas_meter)
+                    .execute_code(&resolver, &mut self, data_store, checksum_store, gas_meter)
                     .map_err(|err| self.maybe_core_dump(err, &current_frame))?;
             match exit_code {
                 ExitCode::Return => {
@@ -184,7 +190,7 @@ impl Interpreter {
                 },
                 ExitCode::Call(fh_idx) => {
                     let func = resolver
-                        .function_from_handle(fh_idx)
+                        .function_from_handle(fh_idx, checksum_store)
                         .map_err(|e| self.set_location(e))?;
 
                     if self.paranoid_type_checks {
@@ -214,6 +220,7 @@ impl Interpreter {
                         self.call_native(
                             &resolver,
                             data_store,
+                            checksum_store,
                             gas_meter,
                             extensions,
                             func,
@@ -223,7 +230,7 @@ impl Interpreter {
                         continue;
                     }
                     let frame = self
-                        .make_call_frame(gas_meter, loader, module_store, func, vec![])
+                        .make_call_frame(gas_meter, loader, checksum_store, func, vec![])
                         .map_err(|e| self.set_location(e))
                         .map_err(|err| self.maybe_core_dump(err, &current_frame))?;
 
@@ -245,7 +252,7 @@ impl Interpreter {
                         .instantiate_generic_function(Some(gas_meter), idx, current_frame.ty_args())
                         .map_err(|e| set_err_info!(current_frame, e))?;
                     let func = resolver
-                        .function_from_instantiation(idx)
+                        .function_from_instantiation(idx, checksum_store)
                         .map_err(|e| self.set_location(e))?;
 
                     if self.paranoid_type_checks {
@@ -264,7 +271,11 @@ impl Interpreter {
                         .charge_call_generic(
                             module_id,
                             func.name(),
-                            ty_args.iter().map(|ty| TypeWithLoader { ty, loader }),
+                            ty_args.iter().map(|ty| TypeWithLoader {
+                                ty,
+                                loader,
+                                session_storage: checksum_store,
+                            }),
                             self.operand_stack
                                 .last_n(func.arg_count())
                                 .map_err(|e| set_err_info!(current_frame, e))?,
@@ -274,13 +285,19 @@ impl Interpreter {
 
                     if func.is_native() {
                         self.call_native(
-                            &resolver, data_store, gas_meter, extensions, func, ty_args,
+                            &resolver,
+                            data_store,
+                            checksum_store,
+                            gas_meter,
+                            extensions,
+                            func,
+                            ty_args,
                         )?;
                         current_frame.pc += 1; // advance past the Call instruction in the caller
                         continue;
                     }
                     let frame = self
-                        .make_call_frame(gas_meter, loader, module_store, func, ty_args)
+                        .make_call_frame(gas_meter, loader, checksum_store, func, ty_args)
                         .map_err(|e| self.set_location(e))
                         .map_err(|err| self.maybe_core_dump(err, &current_frame))?;
 
@@ -309,7 +326,7 @@ impl Interpreter {
         &mut self,
         gas_meter: &mut impl GasMeter,
         loader: &Loader,
-        module_store: &ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         func: Arc<Function>,
         ty_args: Vec<Type>,
     ) -> PartialVMResult<Frame> {
@@ -328,7 +345,7 @@ impl Interpreter {
 
             if self.paranoid_type_checks {
                 let ty = self.operand_stack.pop_ty()?;
-                let resolver = func.get_resolver(loader, module_store);
+                let resolver = func.get_resolver(loader, checksum_store);
                 if is_generic {
                     ty.check_eq(
                         &resolver.subst(&func.local_types()[arg_count - i - 1], &ty_args)?,
@@ -339,7 +356,7 @@ impl Interpreter {
                 }
             }
         }
-        self.make_new_frame(gas_meter, loader, module_store, func, ty_args, locals)
+        self.make_new_frame(gas_meter, loader, checksum_store, func, ty_args, locals)
     }
 
     /// Create a new `Frame` given a `Function` and the function `Locals`.
@@ -349,7 +366,7 @@ impl Interpreter {
         &self,
         gas_meter: &mut impl GasMeter,
         loader: &Loader,
-        module_store: &ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         function: Arc<Function>,
         ty_args: Vec<Type>,
         locals: Locals,
@@ -363,7 +380,7 @@ impl Interpreter {
             if ty_args.is_empty() {
                 function.local_types().to_vec()
             } else {
-                let resolver = function.get_resolver(loader, module_store);
+                let resolver = function.get_resolver(loader, checksum_store);
                 function
                     .local_types()
                     .iter()
@@ -383,11 +400,13 @@ impl Interpreter {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Call a native functions.
     fn call_native(
         &mut self,
         resolver: &Resolver,
         data_store: &mut TransactionDataCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         function: Arc<Function>,
@@ -397,6 +416,7 @@ impl Interpreter {
         self.call_native_impl(
             resolver,
             data_store,
+            checksum_store,
             gas_meter,
             extensions,
             function.clone(),
@@ -420,10 +440,12 @@ impl Interpreter {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn call_native_impl(
         &mut self,
         resolver: &Resolver,
         data_store: &mut TransactionDataCache,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         extensions: &mut NativeContextExtensions,
         function: Arc<Function>,
@@ -448,6 +470,7 @@ impl Interpreter {
         let mut native_context = NativeContext::new(
             self,
             data_store,
+            checksum_store,
             resolver,
             extensions,
             gas_meter.balance_internal(),
@@ -458,6 +481,7 @@ impl Interpreter {
             ty_args.iter().map(|ty| TypeWithLoader {
                 ty,
                 loader: resolver.loader(),
+                session_storage: checksum_store,
             }),
             args.iter(),
         )?;
@@ -589,17 +613,21 @@ impl Interpreter {
     fn load_resource<'c>(
         loader: &Loader,
         data_store: &'c mut TransactionDataCache,
-        module_store: &'c ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<&'c mut GlobalValue> {
-        match data_store.load_resource(loader, addr, ty, module_store) {
+        match data_store.load_resource(loader, checksum_store, addr, ty) {
             Ok((gv, load_res)) => {
                 if let Some(bytes_loaded) = load_res {
                     gas_meter.charge_load_resource(
                         addr,
-                        TypeWithLoader { ty, loader },
+                        TypeWithLoader {
+                            ty,
+                            loader,
+                            session_storage: checksum_store,
+                        },
                         gv.view(),
                         bytes_loaded,
                     )?;
@@ -610,6 +638,7 @@ impl Interpreter {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// BorrowGlobal (mutable and not) opcode.
     fn borrow_global(
         &mut self,
@@ -617,28 +646,22 @@ impl Interpreter {
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        module_store: &ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<()> {
-        let res = Self::load_resource(loader, data_store, module_store, gas_meter, addr, ty)?
+        let res = Self::load_resource(loader, data_store, checksum_store, gas_meter, addr, ty)?
             .borrow_global();
         gas_meter.charge_borrow_global(
             is_mut,
             is_generic,
-            TypeWithLoader { ty, loader },
-            res.is_ok(),
-        )?;
-        self.check_access(
-            loader,
-            if is_mut {
-                AccessKind::Writes
-            } else {
-                AccessKind::Reads
+            TypeWithLoader {
+                ty,
+                loader,
+                session_storage: checksum_store,
             },
-            ty,
-            addr,
+            res.is_ok(),
         )?;
         self.operand_stack.push(res.map_err(|err| {
             err.with_message(format!("Failed to borrow global resource from {:?}", addr))
@@ -648,14 +671,13 @@ impl Interpreter {
 
     fn check_access(
         &self,
-        loader: &Loader,
         kind: AccessKind,
         ty: &Type,
         addr: AccountAddress,
     ) -> PartialVMResult<()> {
-        let (struct_idx, instance) = match ty {
-            Type::Struct { idx, .. } => (*idx, [].as_slice()),
-            Type::StructInstantiation { idx, ty_args, .. } => (*idx, ty_args.as_slice()),
+        let (struct_id, instance) = match ty {
+            Type::Struct { id, .. } => (id, [].as_slice()),
+            Type::StructInstantiation { id, ty_args, .. } => (id, ty_args.as_slice()),
             _ => {
                 return Err(
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
@@ -663,59 +685,80 @@ impl Interpreter {
                 )
             },
         };
-        let struct_name = &*loader.name_cache.idx_to_identifier(struct_idx);
-        if let Some(access) = AccessInstance::new(kind, struct_name, instance, addr) {
+        if let Some(access) = AccessInstance::new(kind, struct_id, instance, addr) {
             self.access_control.check_access(access)?
         }
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Exists opcode.
     fn exists(
         &mut self,
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        module_store: &ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<()> {
-        let gv = Self::load_resource(loader, data_store, module_store, gas_meter, addr, ty)?;
+        let gv = Self::load_resource(loader, data_store, checksum_store, gas_meter, addr, ty)?;
         let exists = gv.exists()?;
-        gas_meter.charge_exists(is_generic, TypeWithLoader { ty, loader }, exists)?;
-        self.check_access(loader, AccessKind::Reads, ty, addr)?;
+        gas_meter.charge_exists(
+            is_generic,
+            TypeWithLoader {
+                ty,
+                loader,
+                session_storage: checksum_store,
+            },
+            exists,
+        )?;
+        self.check_access(AccessKind::Reads, ty, addr)?;
         self.operand_stack.push(Value::bool(exists))?;
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// MoveFrom opcode.
     fn move_from(
         &mut self,
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        module_store: &ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<()> {
         let resource =
-            match Self::load_resource(loader, data_store, module_store, gas_meter, addr, ty)?
+            match Self::load_resource(loader, data_store, checksum_store, gas_meter, addr, ty)?
                 .move_from()
             {
                 Ok(resource) => {
                     gas_meter.charge_move_from(
                         is_generic,
-                        TypeWithLoader { ty, loader },
+                        TypeWithLoader {
+                            ty,
+                            loader,
+                            session_storage: checksum_store,
+                        },
                         Some(&resource),
                     )?;
-                    self.check_access(loader, AccessKind::Writes, ty, addr)?;
+                    self.check_access(AccessKind::Writes, ty, addr)?;
                     resource
                 },
                 Err(err) => {
                     let val: Option<&Value> = None;
-                    gas_meter.charge_move_from(is_generic, TypeWithLoader { ty, loader }, val)?;
+                    gas_meter.charge_move_from(
+                        is_generic,
+                        TypeWithLoader {
+                            ty,
+                            loader,
+                            session_storage: checksum_store,
+                        },
+                        val,
+                    )?;
                     return Err(
                         err.with_message(format!("Failed to move resource from {:?}", addr))
                     );
@@ -725,36 +768,45 @@ impl Interpreter {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// MoveTo opcode.
     fn move_to(
         &mut self,
         is_generic: bool,
         loader: &Loader,
         data_store: &mut TransactionDataCache,
-        module_store: &ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
         addr: AccountAddress,
         ty: &Type,
         resource: Value,
     ) -> PartialVMResult<()> {
-        let gv = Self::load_resource(loader, data_store, module_store, gas_meter, addr, ty)?;
+        let gv = Self::load_resource(loader, data_store, checksum_store, gas_meter, addr, ty)?;
         // NOTE(Gas): To maintain backward compatibility, we need to charge gas after attempting
         //            the move_to operation.
         match gv.move_to(resource) {
             Ok(()) => {
                 gas_meter.charge_move_to(
                     is_generic,
-                    TypeWithLoader { ty, loader },
+                    TypeWithLoader {
+                        ty,
+                        loader,
+                        session_storage: checksum_store,
+                    },
                     gv.view().unwrap(),
                     true,
                 )?;
-                self.check_access(loader, AccessKind::Writes, ty, addr)?;
+                self.check_access(AccessKind::Writes, ty, addr)?;
                 Ok(())
             },
             Err((err, resource)) => {
                 gas_meter.charge_move_to(
                     is_generic,
-                    TypeWithLoader { ty, loader },
+                    TypeWithLoader {
+                        ty,
+                        loader,
+                        session_storage: checksum_store,
+                    },
                     &resource,
                     false,
                 )?;
@@ -799,6 +851,7 @@ impl Interpreter {
         &self,
         buf: &mut B,
         loader: &Loader,
+        checksum_store: &SessionCache,
         idx: usize,
         frame: &Frame,
     ) -> PartialVMResult<()> {
@@ -813,7 +866,7 @@ impl Interpreter {
         let ty_args = frame.ty_args();
         let mut ty_tags = vec![];
         for ty in ty_args {
-            ty_tags.push(loader.type_to_type_tag(ty)?);
+            ty_tags.push(loader.type_to_type_tag(ty, checksum_store)?);
         }
         if !ty_tags.is_empty() {
             debug_write!(buf, "<")?;
@@ -863,10 +916,11 @@ impl Interpreter {
         &self,
         buf: &mut B,
         loader: &Loader,
+        checksum_store: &SessionCache,
     ) -> PartialVMResult<()> {
         debug_writeln!(buf, "Call Stack:")?;
         for (i, frame) in self.call_stack.0.iter().enumerate() {
-            self.debug_print_frame(buf, loader, i, frame)?;
+            self.debug_print_frame(buf, loader, checksum_store, i, frame)?;
         }
         debug_writeln!(buf, "Operand Stack:")?;
         for (idx, val) in self.operand_stack.value.iter().enumerate() {
@@ -885,6 +939,7 @@ impl Interpreter {
     /// It is used when generating a core dump but can be used for debugging of the interpreter.
     /// It will be exposed via a debug module to give developers a way to print the internals
     /// of an execution.
+    #[allow(dead_code)]
     fn internal_state_str(&self, current_frame: &Frame) -> String {
         let mut internal_state = "Call stack:\n".to_string();
         for (i, frame) in self.call_stack.0.iter().enumerate() {
@@ -1101,18 +1156,23 @@ impl CallStack {
     }
 }
 
-fn check_depth_of_type(resolver: &Resolver, ty: &Type) -> PartialVMResult<()> {
+fn check_depth_of_type(
+    resolver: &Resolver,
+    checksum_store: &SessionCache,
+    ty: &Type,
+) -> PartialVMResult<()> {
     // Start at 1 since we always call this right before we add a new node to the value's depth.
     let max_depth = match resolver.loader().vm_config().max_value_nest_depth {
         Some(max_depth) => max_depth,
         None => return Ok(()),
     };
-    check_depth_of_type_impl(resolver, ty, max_depth, 1)?;
+    check_depth_of_type_impl(resolver, checksum_store, ty, max_depth, 1)?;
     Ok(())
 }
 
 fn check_depth_of_type_impl(
     resolver: &Resolver,
+    checksum_store: &SessionCache,
     ty: &Type,
     max_depth: u64,
     depth: u64,
@@ -1142,28 +1202,36 @@ fn check_depth_of_type_impl(
         // Even though this is recursive this is OK since the depth of this recursion is
         // bounded by the depth of the type arguments, which we have already checked.
         Type::Reference(ty) | Type::MutableReference(ty) => {
-            check_depth_of_type_impl(resolver, ty, max_depth, check_depth!(1))?
+            check_depth_of_type_impl(resolver, checksum_store, ty, max_depth, check_depth!(1))?
         },
-        Type::Vector(ty) => check_depth_of_type_impl(resolver, ty, max_depth, check_depth!(1))?,
-        Type::Struct { idx, .. } => {
+        Type::Vector(ty) => {
+            check_depth_of_type_impl(resolver, checksum_store, ty, max_depth, check_depth!(1))?
+        },
+        Type::Struct { id, .. } => {
             let formula = resolver
                 .loader()
-                .calculate_depth_of_struct(*idx, resolver.module_store())?;
+                .calculate_depth_of_struct(id, checksum_store)?;
             check_depth!(formula.solve(&[]))
         },
         // NB: substitution must be performed before calling this function
-        Type::StructInstantiation { idx, ty_args, .. } => {
+        Type::StructInstantiation { id, ty_args, .. } => {
             // Calculate depth of all type arguments, and make sure they themselves are not too deep.
             let ty_arg_depths = ty_args
                 .iter()
                 .map(|ty| {
                     // Ty args should be fully resolved and not need any type arguments
-                    check_depth_of_type_impl(resolver, ty, max_depth, check_depth!(0))
+                    check_depth_of_type_impl(
+                        resolver,
+                        checksum_store,
+                        ty,
+                        max_depth,
+                        check_depth!(0),
+                    )
                 })
                 .collect::<PartialVMResult<Vec<_>>>()?;
             let formula = resolver
                 .loader()
-                .calculate_depth_of_struct(*idx, resolver.module_store())?;
+                .calculate_depth_of_struct(id, checksum_store)?;
             check_depth!(formula.solve(&ty_arg_depths))
         },
         Type::TyParam(_) => {
@@ -1195,7 +1263,7 @@ struct FrameTypeCache {
         BTreeMap<StructDefInstantiationIndex, Vec<(Type, NumTypeNodes)>>,
     struct_def_instantiation_type: BTreeMap<StructDefInstantiationIndex, (Type, NumTypeNodes)>,
     /// For a given field instantiation, the:
-    ///    ((Type of the field, size of the field type) and (Type of its defining struct, size of its defining struct)
+    ///    (Type of the field, size of the field type) and (Type of its defining struct, size of its defining struct)
     field_instantiation:
         BTreeMap<FieldInstantiationIndex, ((Type, NumTypeNodes), (Type, NumTypeNodes))>,
     single_sig_token_type: BTreeMap<SignatureIndex, (Type, NumTypeNodes)>,
@@ -1335,10 +1403,10 @@ impl Frame {
         resolver: &Resolver,
         interpreter: &mut Interpreter,
         data_store: &mut TransactionDataCache,
-        module_store: &ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
     ) -> VMResult<ExitCode> {
-        self.execute_code_impl(resolver, interpreter, data_store, module_store, gas_meter)
+        self.execute_code_impl(resolver, interpreter, data_store, checksum_store, gas_meter)
             .map_err(|e| {
                 let e = if cfg!(feature = "testing") || cfg!(feature = "stacktrace") {
                     e.with_exec_state(interpreter.get_internal_state())
@@ -1956,7 +2024,7 @@ impl Frame {
         resolver: &Resolver,
         interpreter: &mut Interpreter,
         data_store: &mut TransactionDataCache,
-        module_store: &ModuleStorageAdapter,
+        checksum_store: &SessionCache,
         gas_meter: &mut impl GasMeter,
     ) -> PartialVMResult<ExitCode> {
         use SimpleInstruction as S;
@@ -1966,6 +2034,7 @@ impl Frame {
                 TypeWithLoader {
                     ty: $ty,
                     loader: resolver.loader(),
+                    session_storage: checksum_store,
                 }
             };
         }
@@ -1979,6 +2048,7 @@ impl Frame {
                     self.pc,
                     instruction,
                     resolver,
+                    checksum_store,
                     interpreter
                 );
 
@@ -2182,7 +2252,7 @@ impl Frame {
                     Bytecode::Pack(sd_idx) => {
                         let field_count = resolver.field_count(*sd_idx);
                         let struct_type = resolver.get_struct_type(*sd_idx)?;
-                        check_depth_of_type(resolver, &struct_type)?;
+                        check_depth_of_type(resolver, checksum_store, &struct_type)?;
                         gas_meter.charge_pack(
                             false,
                             interpreter.operand_stack.last_n(field_count as usize)?,
@@ -2212,7 +2282,7 @@ impl Frame {
                             self.ty_cache
                                 .get_struct_type(*si_idx, resolver, &self.ty_args)?;
                         gas_meter.charge_create_ty(ty_count)?;
-                        check_depth_of_type(resolver, ty)?;
+                        check_depth_of_type(resolver, checksum_store, ty)?;
 
                         let field_count = resolver.field_instantiation_count(*si_idx);
                         gas_meter.charge_pack(
@@ -2253,7 +2323,7 @@ impl Frame {
                                 .get_struct_type(*si_idx, resolver, &self.ty_args)?;
                         gas_meter.charge_create_ty(ty_count)?;
 
-                        check_depth_of_type(resolver, ty)?;
+                        check_depth_of_type(resolver, checksum_store, ty)?;
 
                         let struct_ = interpreter.operand_stack.pop_as::<Struct>()?;
 
@@ -2430,7 +2500,7 @@ impl Frame {
                             false,
                             resolver.loader(),
                             data_store,
-                            module_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2449,7 +2519,7 @@ impl Frame {
                             true,
                             resolver.loader(),
                             data_store,
-                            module_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             ty,
@@ -2462,7 +2532,7 @@ impl Frame {
                             false,
                             resolver.loader(),
                             data_store,
-                            module_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2478,7 +2548,7 @@ impl Frame {
                             true,
                             resolver.loader(),
                             data_store,
-                            module_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             ty,
@@ -2491,7 +2561,7 @@ impl Frame {
                             false,
                             resolver.loader(),
                             data_store,
-                            module_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2507,7 +2577,7 @@ impl Frame {
                             true,
                             resolver.loader(),
                             data_store,
-                            module_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             ty,
@@ -2527,7 +2597,7 @@ impl Frame {
                             false,
                             resolver.loader(),
                             data_store,
-                            module_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             &ty,
@@ -2550,7 +2620,7 @@ impl Frame {
                             true,
                             resolver.loader(),
                             data_store,
-                            module_store,
+                            checksum_store,
                             gas_meter,
                             addr,
                             ty,
@@ -2575,7 +2645,7 @@ impl Frame {
                             self.ty_cache
                                 .get_signature_index_type(*si, resolver, &self.ty_args)?;
                         gas_meter.charge_create_ty(ty_count)?;
-                        check_depth_of_type(resolver, ty)?;
+                        check_depth_of_type(resolver, checksum_store, ty)?;
                         gas_meter.charge_vec_pack(
                             make_ty!(ty),
                             interpreter.operand_stack.last_n(*num as usize)?,
@@ -2593,6 +2663,7 @@ impl Frame {
                         gas_meter.charge_vec_len(TypeWithLoader {
                             ty,
                             loader: resolver.loader(),
+                            session_storage: checksum_store,
                         })?;
                         let value = vec_ref.len(ty)?;
                         interpreter.operand_stack.push(value)?;
@@ -2703,12 +2774,8 @@ impl Frame {
         &self.ty_args
     }
 
-    fn resolver<'a>(
-        &self,
-        loader: &'a Loader,
-        module_store: &'a ModuleStorageAdapter,
-    ) -> Resolver<'a> {
-        self.function.get_resolver(loader, module_store)
+    fn resolver<'a>(&self, loader: &'a Loader, checksum_store: &SessionCache) -> Resolver<'a> {
+        self.function.get_resolver(loader, checksum_store)
     }
 
     fn location(&self) -> Location {

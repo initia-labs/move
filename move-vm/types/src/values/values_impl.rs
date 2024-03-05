@@ -1203,6 +1203,21 @@ impl Value {
         ))))
     }
 
+    // API is not checking the value layout, so the caller need to be careful.
+    pub fn string(s: String) -> Self {
+        Value::struct_(Struct::pack(vec![Value::vector_u8(s.into_bytes())]))
+    }
+
+    // API is not checking the value layout, so the caller need to be careful.
+    pub fn json_array_value(ty: u8, val: String) -> Self {
+        Value::struct_(Struct::pack(vec![Value::u8(ty), Value::string(val)]))
+    }
+
+    // API is not checking the value layout, so the caller need to be careful.
+    pub fn json_object_value(ty: u8, key: String, val: String) -> Self {
+        Value::struct_(Struct::pack(vec![Value::u8(ty), Value::string(key), Value::string(val)]))
+    }
+
     pub fn vector_u8(it: impl IntoIterator<Item = u8>) -> Self {
         Self(ValueImpl::Container(Container::VecU8(Rc::new(
             RefCell::new(it.into_iter().collect()),
@@ -1249,6 +1264,24 @@ impl Value {
         Self(ValueImpl::Container(Container::VecAddress(Rc::new(
             RefCell::new(it.into_iter().collect()),
         ))))
+    }
+
+    // API is not checking the value layout, so the caller need to be careful.
+    pub fn vector_json_array_value(it: impl IntoIterator<Item = (u8, String)>) -> Self {
+        Self(ValueImpl::Container(Container::Vec(Rc::new(RefCell::new(
+            it.into_iter()
+                .map(|(ty, v)| Value::json_array_value(ty, v).0)
+                .collect(),
+        )))))
+    }
+
+    // API is not checking the value layout, so the caller need to be careful.
+    pub fn vector_json_object_value(it: impl IntoIterator<Item = (u8, String, String)>) -> Self {
+        Self(ValueImpl::Container(Container::Vec(Rc::new(RefCell::new(
+            it.into_iter()
+                .map(|(ty, k, v)| Value::json_object_value(ty, k, v).0)
+                .collect(),
+        )))))
     }
 
     // REVIEW: This API can break
@@ -2253,7 +2286,7 @@ impl Vector {
             | Type::Vector(_)
             | Type::Struct { .. }
             | Type::StructInstantiation {
-                idx: _, ty_args: _, ..
+                id: _, ty_args: _, ..
             } => Value(ValueImpl::Container(Container::Vec(Rc::new(RefCell::new(
                 elements.into_iter().map(|v| v.0).collect(),
             ))))),

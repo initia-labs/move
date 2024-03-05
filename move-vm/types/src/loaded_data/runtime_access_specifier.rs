@@ -284,7 +284,7 @@ macro_rules! module_addr {
 
 macro_rules! struct_identifier_module {
     ($m:pat) => {
-        StructIdentifier { module: $m, .. }
+        StructIdentifier { module_id: $m, .. }
     };
 }
 
@@ -310,8 +310,8 @@ impl ResourceSpecifier {
         use ResourceSpecifier::*;
         match self {
             Any => true,
-            DeclaredAtAddress(addr) => struct_id.module.address() == addr,
-            DeclaredInModule(module_id) => &struct_id.module == module_id,
+            DeclaredAtAddress(addr) => struct_id.module_id.address() == addr,
+            DeclaredInModule(module_id) => &struct_id.module_id == module_id,
             Resource(enabled_struct_id) => enabled_struct_id == struct_id,
             ResourceInstantiation(enabled_struct_id, enabled_type_inst) => {
                 enabled_struct_id == struct_id && enabled_type_inst == type_inst
@@ -345,10 +345,10 @@ impl ResourceSpecifier {
             Resource(struct_id) => match &other {
                 Any => Some(self.clone()),
                 DeclaredAtAddress(addr) => {
-                    some_if!(self.clone(), addr == struct_id.module.address())
+                    some_if!(self.clone(), addr == struct_id.module_id.address())
                 },
                 DeclaredInModule(module_id) => {
-                    some_if!(self.clone(), module_id == &struct_id.module)
+                    some_if!(self.clone(), module_id == &struct_id.module_id)
                 },
                 Resource(other_struct_id) | ResourceInstantiation(other_struct_id, _) => {
                     some_if!(other.clone(), struct_id == other_struct_id)
@@ -357,10 +357,10 @@ impl ResourceSpecifier {
             ResourceInstantiation(struct_id, inst) => match other {
                 Any => Some(self.clone()),
                 DeclaredAtAddress(addr) => {
-                    some_if!(self.clone(), struct_id.module.address() == addr)
+                    some_if!(self.clone(), struct_id.module_id.address() == addr)
                 },
                 DeclaredInModule(module_id) => {
-                    some_if!(self.clone(), &struct_id.module == module_id)
+                    some_if!(self.clone(), &struct_id.module_id == module_id)
                 },
                 Resource(other_struct_id) => some_if!(self.clone(), struct_id == other_struct_id),
                 ResourceInstantiation(other_struct_id, other_inst) => {

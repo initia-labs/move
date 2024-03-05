@@ -27,6 +27,8 @@ pub struct VMConfig {
     pub type_base_cost: u64,
     pub type_byte_cost: u64,
     pub aggregator_v2_type_tagging: bool,
+    pub module_cache_capacity: usize,
+    pub script_cache_capacity: usize,
 }
 
 impl Default for VMConfig {
@@ -42,6 +44,8 @@ impl Default for VMConfig {
             type_base_cost: 0,
             type_byte_cost: 0,
             aggregator_v2_type_tagging: false,
+            module_cache_capacity: 1000,
+            script_cache_capacity: 100,
         }
     }
 }

@@ -33,6 +33,19 @@ impl<T> Op<T> {
         }
     }
 
+    pub fn map_ref<F, U>(&self, f: F) -> Op<U>
+    where
+        F: FnOnce(&T) -> U,
+    {
+        use Op::*;
+
+        match self {
+            New(data) => New(f(data)),
+            Modify(data) => Modify(f(data)),
+            Delete => Delete,
+        }
+    }
+
     /// Applies `f` on the op and returns the result. If function
     /// application fails, an error is returned.
     pub fn and_then<U, E, F>(self, f: F) -> Result<Op<U>, E>
@@ -317,7 +330,7 @@ impl<Module, Resource> Changes<Module, Resource> {
 }
 
 // These aliases are necessary because AccountChangeSet and ChangeSet were not
-// generic before. In order to minimise the code changes we alias new generic
+// generic before. In order to minimize the code changes we alias new generic
 // types.
 pub type AccountChangeSet = AccountChanges<Bytes, Bytes>;
 pub type ChangeSet = Changes<Bytes, Bytes>;

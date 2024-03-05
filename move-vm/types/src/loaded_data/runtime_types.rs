@@ -29,6 +29,9 @@ use triomphe::Arc as TriompheArc;
 
 pub const TYPE_DEPTH_MAX: usize = 256;
 
+// runtime checksum type which is used for cache key.
+pub type Checksum = [u8; 32];
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Debug)]
 /// A formula describing the value depth of a type, using (the depths of) the type parameters as inputs.
 ///
@@ -124,7 +127,7 @@ impl DepthFormula {
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct StructType {
-    pub idx: StructNameIndex,
+    pub id: StructIdentifier,
     pub fields: Vec<Type>,
     pub field_names: Vec<Identifier>,
     pub phantom_ty_args_mask: SmallBitVec,
@@ -168,13 +171,22 @@ impl StructType {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct StructNameIndex(pub usize);
-
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StructIdentifier {
-    pub module: ModuleId,
+    pub module_id: ModuleId,
     pub name: Identifier,
+}
+
+#[cfg(test)]
+impl StructIdentifier {
+    fn empty() -> Self {
+        use move_core_types::account_address::AccountAddress;
+
+        StructIdentifier {
+            module_id: ModuleId::new(AccountAddress::ONE, Identifier::new("").unwrap()),
+            name: Identifier::new("").unwrap(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -187,11 +199,11 @@ pub enum Type {
     Signer,
     Vector(TriompheArc<Type>),
     Struct {
-        idx: StructNameIndex,
+        id: StructIdentifier,
         ability: AbilityInfo,
     },
     StructInstantiation {
-        idx: StructNameIndex,
+        id: StructIdentifier,
         ty_args: TriompheArc<Vec<Type>>,
         ability: AbilityInfo,
     },
@@ -313,12 +325,12 @@ impl Type {
             Type::MutableReference(ty) => {
                 Type::MutableReference(Box::new(ty.apply_subst(subst, depth + 1)?))
             },
-            Type::Struct { idx, ability } => Type::Struct {
-                idx: *idx,
+            Type::Struct { id, ability } => Type::Struct {
+                id: id.clone(),
                 ability: ability.clone(),
             },
             Type::StructInstantiation {
-                idx,
+                id,
                 ty_args: instantiation,
                 ability,
             } => {
@@ -327,7 +339,7 @@ impl Type {
                     inst.push(ty.apply_subst(subst, depth + 1)?)
                 }
                 Type::StructInstantiation {
-                    idx: *idx,
+                    id: id.clone(),
                     ty_args: TriompheArc::new(inst),
                     ability: ability.clone(),
                 }
@@ -481,11 +493,11 @@ impl Type {
                 "Unexpected TyParam type after translating from TypeTag to Type".to_string(),
             )),
 
-            Type::Vector(ty) => {
-                AbilitySet::polymorphic_abilities(AbilitySet::VECTOR, vec![false], vec![
-                    ty.abilities()?
-                ])
-            },
+            Type::Vector(ty) => AbilitySet::polymorphic_abilities(
+                AbilitySet::VECTOR,
+                vec![false],
+                vec![ty.abilities()?],
+            ),
             Type::Struct { ability, .. } => Ok(ability.base_ability_set),
             Type::StructInstantiation {
                 ty_args,
@@ -586,7 +598,7 @@ impl fmt::Display for StructIdentifier {
         write!(
             f,
             "{}::{}",
-            self.module.short_str_lossless(),
+            self.module_id.short_str_lossless(),
             self.name.as_str()
         )
     }
@@ -606,15 +618,15 @@ impl fmt::Display for Type {
             Address => f.write_str("address"),
             Signer => f.write_str("signer"),
             Vector(et) => write!(f, "vector<{}>", et),
-            Struct { idx, ability: _ } => write!(f, "s#{}", idx.0),
+            Struct { id, ability: _ } => write!(f, "{}", id),
             StructInstantiation {
-                idx,
+                id,
                 ty_args,
                 ability: _,
             } => write!(
                 f,
-                "s#{}<{}>",
-                idx.0,
+                "{}<{}>",
+                id,
                 ty_args.iter().map(|t| t.to_string()).join(",")
             ),
             Reference(t) => write!(f, "&{}", t),
@@ -630,7 +642,7 @@ mod unit_tests {
 
     fn struct_inst_for_test(ty_args: Vec<Type>) -> Type {
         Type::StructInstantiation {
-            idx: StructNameIndex(0),
+            id: StructIdentifier::empty(),
             ability: AbilityInfo::struct_(AbilitySet::EMPTY),
             ty_args: TriompheArc::new(ty_args),
         }
@@ -638,7 +650,7 @@ mod unit_tests {
 
     fn struct_for_test() -> Type {
         Type::Struct {
-            idx: StructNameIndex(0),
+            id: StructIdentifier::empty(),
             ability: AbilityInfo::struct_(AbilitySet::EMPTY),
         }
     }

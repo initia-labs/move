@@ -20,11 +20,13 @@ ResolutionGraph {
             known_attributes: {
                 "bytecode_instruction",
                 "deprecated",
+                "event",
                 "expected_failure",
                 "native_interface",
                 "test",
                 "test_only",
                 "verify_only",
+                "view",
             },
             skip_attribute_checks: false,
             compiler_version: None,
