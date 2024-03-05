@@ -27,7 +27,7 @@ use super::{
 #[derive(Clone)]
 pub(crate) struct Script {
     // primitive pools
-    pub(crate) script: CompiledScript,
+    pub(crate) script: Arc<CompiledScript>,
 
     // functions as indexes into the Loader function list
     function_refs: Vec<FunctionHandle>,
@@ -49,7 +49,7 @@ pub(crate) struct Script {
 
 impl Script {
     pub(crate) fn new(
-        script: CompiledScript,
+        script: Arc<CompiledScript>,
         script_hash: &Checksum,
         module_cache: &ModuleCache,
         session_storage: &dyn SessionStorage,
@@ -175,7 +175,7 @@ impl Script {
                                                 expects one and only one signature token"
                                         .to_owned(),
                                 ));
-                            },
+                            }
                             Some(sig_token) => sig_token,
                         };
                         single_signature_token_map.insert(
@@ -183,8 +183,8 @@ impl Script {
                             intern_type(BinaryIndexedView::Script(&script), ty, &struct_names)?,
                         );
                     }
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
 

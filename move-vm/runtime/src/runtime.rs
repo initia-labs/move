@@ -72,7 +72,7 @@ impl VMRuntime {
         native_extensions: NativeContextExtensions<'r>,
     ) -> Session<'r, '_> {
         Session {
-            runtime: &self,
+            runtime: self,
             data_cache: TransactionDataCache::new(remote),
             session_cache: SessionCache::new(
                 remote,
@@ -124,7 +124,7 @@ impl VMRuntime {
                         "[VM] module deserialization failed".to_string(),
                     )
                     .finish(Location::Undefined));
-            },
+            }
         };
 
         // Make sure all modules' self addresses matches the transaction sender. The self address is
@@ -263,7 +263,7 @@ impl VMRuntime {
                     StatusCode::INVALID_PARAM_TYPE_FOR_DESERIALIZATION,
                 )
                 .with_message("[VM] failed to get layout from type".to_string()));
-            },
+            }
         };
 
         let deserialization_error = || -> PartialVMError {
@@ -320,7 +320,7 @@ impl VMRuntime {
                             .enable_invariant_violation_check_in_swap_loc,
                     )?;
                     dummy_locals.borrow_loc(idx)
-                },
+                }
                 _ => self.deserialize_arg(checksum_store, &arg_ty, arg_bytes),
             })
             .collect::<PartialVMResult<Vec<_>>>()?;
@@ -342,7 +342,7 @@ impl VMRuntime {
                 })?;
                 let inner_value = ref_value.read_ref()?;
                 (&**inner, inner_value)
-            },
+            }
             _ => (ty, value),
         };
 
@@ -598,7 +598,7 @@ impl VMRuntime {
             },
         ) = self
             .loader
-            .load_script(script.borrow(), &ty_args, session_cache)?;
+            .load_script(session_cache, script.borrow(), &ty_args)?;
         // execute the function
         self.execute_function_impl(
             func,

@@ -108,9 +108,9 @@ impl Loader {
     // Type parameters are checked as well after every type is loaded.
     pub(crate) fn load_script(
         &self,
+        session_storage: &dyn SessionStorage,
         script_blob: &[u8],
         ty_args: &[TypeTag],
-        session_storage: &dyn SessionStorage,
     ) -> VMResult<(Arc<Function>, LoadedFunctionInstantiation)> {
         // retrieve or load the script
         let mut sha3_256 = Sha3_256::new();
@@ -123,12 +123,12 @@ impl Loader {
                 self.script_cache_hits.write().record_hit(&checksum);
 
                 cached
-            },
+            }
             None => {
-                let ver_script =
-                    self.deserialize_and_verify_script(script_blob, session_storage)?;
+                let arc_script =
+                    self.deserialize_and_verify_script(session_storage, script_blob)?;
                 let script = Script::new(
-                    ver_script,
+                    arc_script,
                     &checksum,
                     &self.module_cache.read(),
                     session_storage,
@@ -144,7 +144,7 @@ impl Loader {
                 }
 
                 cached
-            },
+            }
         };
 
         // explicitly drop
@@ -184,21 +184,11 @@ impl Loader {
     // Caching will take care of that by asking for each dependency module again under lock.
     fn deserialize_and_verify_script(
         &self,
-        script: &[u8],
         session_storage: &dyn SessionStorage,
-    ) -> VMResult<CompiledScript> {
-        let script = match CompiledScript::deserialize_with_config(
-            script,
-            &self.vm_config.deserializer_config,
-        ) {
-            Ok(script) => script,
-            Err(err) => {
-                let msg = format!("[VM] deserializer for script returned error: {:?}", err);
-                return Err(PartialVMError::new(StatusCode::CODE_DESERIALIZATION_ERROR)
-                    .with_message(msg)
-                    .finish(Location::Script));
-            },
-        };
+        script_blob: &[u8],
+    ) -> VMResult<Arc<CompiledScript>> {
+        // already checked the cache, so don't need to lookup cache
+        let script = self.deserialize_script(session_storage, script_blob, false)?;
 
         match self.verify_script(&script) {
             Ok(_) => {
@@ -210,9 +200,31 @@ impl Loader {
                     .collect::<VMResult<_>>()?;
                 self.verify_script_dependencies(&script, loaded_deps)?;
                 Ok(script)
-            },
+            }
             Err(err) => Err(err),
         }
+    }
+
+    fn deserialize_script(
+        &self,
+        session_storage: &dyn SessionStorage,
+        script_blob: &[u8],
+        lookup_cache: bool,
+    ) -> VMResult<Arc<CompiledScript>> {
+        if lookup_cache {
+            let mut sha3_256 = Sha3_256::new();
+            sha3_256.update(script_blob);
+            let checksum: Checksum = sha3_256.finalize().into();
+
+            if let Some(cached) = self.script_cache.read().get(&checksum) {
+                self.script_cache_hits.write().record_hit(&checksum);
+                return Ok(cached.script.clone());
+            }
+        }
+
+        session_storage
+            .deserialize_script(script_blob)
+            .map_err(|e| e.finish(Location::Script))
     }
 
     // Script verification steps.
@@ -244,15 +256,18 @@ impl Loader {
         id: &ModuleId,
         session_storage: &dyn SessionStorage,
         allow_loading_failure: bool,
+        lookup_cache: bool,
     ) -> VMResult<(usize, Checksum, Arc<CompiledModule>)> {
-        // if the module is already in the code cache, load the cached version
-        let checksum = session_storage
-            .load_checksum(id)
-            .map_err(|e| e.finish(Location::Module(id.clone())))?;
+        if lookup_cache {
+            // if the module is already in the code cache, load the cached version
+            let checksum = session_storage
+                .load_checksum(id)
+                .map_err(|e| e.finish(Location::Module(id.clone())))?;
 
-        if let Some(cached) = self.module_cache.read().get(&checksum) {
-            self.module_cache_hits.write().record_hit(&checksum);
-            return Ok((cached.size, checksum, cached.module.clone()));
+            if let Some(cached) = self.module_cache.read().get(&checksum) {
+                self.module_cache_hits.write().record_hit(&checksum);
+                return Ok((cached.size, checksum, cached.module.clone()));
+            }
         }
 
         match session_storage.load_module(id) {
@@ -299,17 +314,17 @@ impl Loader {
                 btree_map::Entry::Vacant(vacant_entry) => {
                     vacant_entry.insert(expected);
                     true
-                },
+                }
                 btree_map::Entry::Occupied(occupied_entry) => *occupied_entry.get() == expected,
             },
             // Recursive types we need to recurse the matching types
             (Type::Reference(ret_inner), Type::Reference(expected_inner))
             | (Type::MutableReference(ret_inner), Type::MutableReference(expected_inner)) => {
                 Self::match_return_type(ret_inner, expected_inner, map)
-            },
+            }
             (Type::Vector(ret_inner), Type::Vector(expected_inner)) => {
                 Self::match_return_type(ret_inner, expected_inner, map)
-            },
+            }
             // Abilities should not contribute to the equality check as they just serve for caching computations.
             // For structs the both need to be the same struct.
             (
@@ -337,7 +352,7 @@ impl Loader {
                         .iter()
                         .zip(expected_fields.iter())
                         .all(|types| Self::match_return_type(types.0, types.1, map))
-            },
+            }
             // For primitive types we need to assure the types match
             (Type::U8, Type::U8)
             | (Type::U16, Type::U16)
@@ -578,7 +593,7 @@ impl Loader {
                         locked_module_cache
                             .get(&checksum)
                             .map(|m| m.compiled_module().immediate_dependencies())
-                    },
+                    }
                 }
                 .ok_or_else(|| PartialVMError::new(StatusCode::MISSING_DEPENDENCY))
             },
@@ -598,7 +613,7 @@ impl Loader {
                             locked_module_cache
                                 .get(&checksum)
                                 .map(|m| m.compiled_module().immediate_friends())
-                        },
+                        }
                     }
                     .ok_or_else(|| PartialVMError::new(StatusCode::MISSING_DEPENDENCY))
                 }
@@ -645,7 +660,7 @@ impl Loader {
             TypeTag::Signer => Type::Signer,
             TypeTag::Vector(tt) => {
                 Type::Vector(triomphe::Arc::new(self.load_type(tt, session_storage)?))
-            },
+            }
             TypeTag::Struct(struct_tag) => {
                 let module_id = ModuleId::new(struct_tag.address, struct_tag.module.clone());
                 let module = self.load_module(&module_id, session_storage)?;
@@ -673,7 +688,7 @@ impl Loader {
                         ),
                     }
                 }
-            },
+            }
         })
     }
 
@@ -785,8 +800,9 @@ impl Loader {
         session_storage: &dyn SessionStorage,
         allow_loading_failure: bool,
     ) -> VMResult<(usize, Arc<CompiledModule>)> {
+        // already checked the cache, so don't need to lookup cache
         let (size, checksum, module) =
-            self.load_compiled_module(id, session_storage, allow_loading_failure)?;
+            self.load_compiled_module(id, session_storage, allow_loading_failure, false)?;
 
         fail::fail_point!("verifier-failpoint-2", |_| { Ok((size, module.clone())) });
 
@@ -920,7 +936,7 @@ impl Loader {
                             allow_dependency_loading_failure,
                             dependencies_depth + 1,
                         )?
-                    },
+                    }
                     Some(cached) => cached,
                 };
                 cached_deps.push(loaded);
@@ -1070,7 +1086,7 @@ impl Loader {
                 {
                     return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
                 }
-            },
+            }
             Type::StructInstantiation {
                 ty_args: struct_inst,
                 ..
@@ -1082,7 +1098,7 @@ impl Loader {
                         return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
                     }
                 }
-            },
+            }
             Type::Address
             | Type::Bool
             | Type::Signer
@@ -1142,7 +1158,7 @@ impl Loader {
                             format!("Failed to resolve function: {:?}::{:?}", module_id, name),
                         )
                     })
-            },
+            }
         }
     }
 
@@ -1220,8 +1236,12 @@ impl Loader {
             // Load and deserialize the module only if it has not been cached by the loader.
             // Otherwise this will cause a significant regression in performance.
             let module_id = ModuleId::new(*addr, name.to_owned());
-            let (size, _, module) =
-                self.load_compiled_module(&module_id, session_storage, allow_loading_failure)?;
+            let (size, _, module) = self.load_compiled_module(
+                &module_id,
+                session_storage,
+                allow_loading_failure,
+                true,
+            )?;
 
             // Extend the lifetime of the module to the remainder of the function body
             // by storing it in an arena.
@@ -1273,7 +1293,7 @@ impl Loader {
             // Load and deserialize the module only if it has not been cached by the loader.
             // Otherwise this will cause a significant regression in performance.
             let module_id = ModuleId::new(*addr, name.to_owned());
-            let size = match self.load_compiled_module(&module_id, session_storage, true) {
+            let size = match self.load_compiled_module(&module_id, session_storage, true, true) {
                 Ok((size, _, _)) => size,
                 Err(err) if err.major_status() == StatusCode::LINKER_ERROR => continue,
                 Err(err) => return Err(err),
@@ -1296,9 +1316,7 @@ impl Loader {
         traversal_context: &mut TraversalContext,
         script_blob: &[u8],
     ) -> VMResult<()> {
-        let script = session_storage
-            .deserialize_script(script_blob)
-            .map_err(|e| e.finish(Location::Script))?;
+        let script = self.deserialize_script(session_storage, script_blob, true)?;
         let script = traversal_context.referenced_scripts.alloc(script);
 
         // TODO(Gas): Should we charge dependency gas for the script itself?
@@ -1415,7 +1433,7 @@ impl Loader {
             Type::Signer => TypeTag::Signer,
             Type::Vector(ty) => {
                 TypeTag::Vector(Box::new(self.type_to_type_tag(ty, session_storage)?))
-            },
+            }
             Type::Struct { id, .. } => TypeTag::Struct(Box::new(self.struct_name_to_type_tag(
                 id,
                 &[],
@@ -1430,7 +1448,7 @@ impl Loader {
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!("no type tag for {:?}", ty)),
                 );
-            },
+            }
         })
     }
 
@@ -1442,18 +1460,18 @@ impl Loader {
                 Type::Vector(ty) => {
                     result += 1;
                     todo.push(ty);
-                },
+                }
                 Type::Reference(ty) | Type::MutableReference(ty) => {
                     result += 1;
                     todo.push(ty);
-                },
+                }
                 Type::StructInstantiation { ty_args, .. } => {
                     result += 1;
                     todo.extend(ty_args.iter())
-                },
+                }
                 _ => {
                     result += 1;
-                },
+                }
             }
         }
         result
@@ -1589,39 +1607,39 @@ impl Loader {
             Type::Bool => {
                 *count += 1;
                 (MoveTypeLayout::Bool, false)
-            },
+            }
             Type::U8 => {
                 *count += 1;
                 (MoveTypeLayout::U8, false)
-            },
+            }
             Type::U16 => {
                 *count += 1;
                 (MoveTypeLayout::U16, false)
-            },
+            }
             Type::U32 => {
                 *count += 1;
                 (MoveTypeLayout::U32, false)
-            },
+            }
             Type::U64 => {
                 *count += 1;
                 (MoveTypeLayout::U64, false)
-            },
+            }
             Type::U128 => {
                 *count += 1;
                 (MoveTypeLayout::U128, false)
-            },
+            }
             Type::U256 => {
                 *count += 1;
                 (MoveTypeLayout::U256, false)
-            },
+            }
             Type::Address => {
                 *count += 1;
                 (MoveTypeLayout::Address, false)
-            },
+            }
             Type::Signer => {
                 *count += 1;
                 (MoveTypeLayout::Signer, false)
-            },
+            }
             Type::Vector(ty) => {
                 *count += 1;
                 let (layout, has_identifier_mappings) =
@@ -1630,27 +1648,27 @@ impl Loader {
                     MoveTypeLayout::Vector(Box::new(layout)),
                     has_identifier_mappings,
                 )
-            },
+            }
             Type::Struct { id, .. } => {
                 *count += 1;
                 // Note depth is increased inside struct_name_to_type_layout instead.
                 let (layout, has_identifier_mappings) =
                     self.struct_name_to_type_layout(id, &[], count, depth, session_storage)?;
                 (layout, has_identifier_mappings)
-            },
+            }
             Type::StructInstantiation { id, ty_args, .. } => {
                 *count += 1;
                 // Note depth is incread inside struct_name_to_type_layout instead.
                 let (layout, has_identifier_mappings) =
                     self.struct_name_to_type_layout(id, ty_args, count, depth, session_storage)?;
                 (layout, has_identifier_mappings)
-            },
+            }
             Type::Reference(_) | Type::MutableReference(_) | Type::TyParam(_) => {
                 return Err(
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!("no type layout for {:?}", ty)),
                 );
-            },
+            }
         })
     }
 
@@ -1758,7 +1776,7 @@ impl Loader {
             )),
             Type::Struct { id, .. } => {
                 self.struct_name_to_fully_annotated_layout(id, &[], count, depth, session_storage)?
-            },
+            }
             Type::StructInstantiation { id, ty_args, .. } => self
                 .struct_name_to_fully_annotated_layout(
                     id,
@@ -1772,7 +1790,7 @@ impl Loader {
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!("no type layout for {:?}", ty)),
                 );
-            },
+            }
         })
     }
 
@@ -1835,19 +1853,19 @@ impl Loader {
                 let mut inner = self.calculate_depth_of_type(ty, session_storage)?;
                 inner.scale(1);
                 inner
-            },
+            }
             Type::Reference(ty) | Type::MutableReference(ty) => {
                 let mut inner = self.calculate_depth_of_type(ty, session_storage)?;
                 inner.scale(1);
                 inner
-            },
+            }
             Type::TyParam(ty_idx) => DepthFormula::type_parameter(*ty_idx),
             Type::Struct { id, .. } => {
                 let mut struct_formula = self.calculate_depth_of_struct(id, session_storage)?;
                 debug_assert!(struct_formula.terms.is_empty());
                 struct_formula.scale(1);
                 struct_formula
-            },
+            }
             Type::StructInstantiation { id, ty_args, .. } => {
                 let ty_arg_map = ty_args
                     .iter()
@@ -1861,7 +1879,7 @@ impl Loader {
                 let mut subst_struct_formula = struct_formula.subst(ty_arg_map)?;
                 subst_struct_formula.scale(1);
                 subst_struct_formula
-            },
+            }
         })
     }
 

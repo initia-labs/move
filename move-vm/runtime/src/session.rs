@@ -363,7 +363,7 @@ impl<'r, 'l> Session<'r, 'l> {
         let (_, instantiation) =
             self.runtime
                 .loader
-                .load_script(script.borrow(), &ty_args, &self.session_cache)?;
+                .load_script(&self.session_cache, script.borrow(), &ty_args)?;
         Ok(instantiation)
     }
 

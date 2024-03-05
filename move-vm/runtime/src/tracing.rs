@@ -6,9 +6,9 @@
 use crate::debug::DebugContext;
 #[cfg(any(debug_assertions, feature = "debugging"))]
 use crate::{
-    session_cache::SessionCache,
     interpreter::Interpreter,
     loader::{Function, Loader},
+    session_cache::SessionCache,
 };
 #[cfg(any(debug_assertions, feature = "debugging"))]
 use ::{

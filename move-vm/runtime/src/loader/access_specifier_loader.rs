@@ -107,7 +107,7 @@ fn load_address_specifier(
                 AddressSpecifierFunction::Identity
             };
             Ok(AddressSpecifier::Eval(fun, *param))
-        },
+        }
     }
 }
 

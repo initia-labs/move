@@ -147,17 +147,17 @@ impl DebugContext {
                             DebugCommand::Step => {
                                 self.should_take_input = true;
                                 break;
-                            },
+                            }
                             DebugCommand::Continue => {
                                 self.should_take_input = false;
                                 break;
-                            },
+                            }
                             DebugCommand::Breakpoint(breakpoint) => {
                                 self.breakpoints.insert(breakpoint.to_string());
-                            },
+                            }
                             DebugCommand::DeleteBreakpoint(breakpoint) => {
                                 self.breakpoints.remove(&breakpoint);
-                            },
+                            }
                             DebugCommand::PrintBreakpoints => self
                                 .breakpoints
                                 .iter()
@@ -187,13 +187,13 @@ impl DebugContext {
                                 } else {
                                     println!("            (none)");
                                 }
-                            },
+                            }
                         },
                     },
                     Err(err) => {
                         println!("Error reading input: {}", err);
                         break;
-                    },
+                    }
                 }
             }
         }

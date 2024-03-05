@@ -231,7 +231,7 @@ impl Module {
                                                 expects one and only one signature token"
                                                     .to_owned(),
                                             ));
-                                        },
+                                        }
                                         Some(sig_token) => sig_token,
                                     };
                                     single_signature_token_map.insert(
@@ -243,8 +243,8 @@ impl Module {
                                         )?,
                                     );
                                 }
-                            },
-                            _ => {},
+                            }
+                            _ => {}
                         }
                     }
                 }

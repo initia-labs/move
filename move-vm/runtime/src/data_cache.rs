@@ -184,7 +184,7 @@ impl<'r> TransactionDataCache<'r> {
                 // non-struct top-level value; can't happen
                 {
                     return Err(PartialVMError::new(StatusCode::INTERNAL_TYPE_ERROR))
-                },
+                }
             };
             // TODO(Gas): Shall we charge for this?
             let (ty_layout, has_aggregator_lifting) =
@@ -222,11 +222,11 @@ impl<'r> TransactionDataCache<'r> {
                                 StatusCode::FAILED_TO_DESERIALIZE_RESOURCE,
                             )
                             .with_message(msg));
-                        },
+                        }
                     };
 
                     GlobalValue::cached(val)?
-                },
+                }
                 None => GlobalValue::none(),
             };
 

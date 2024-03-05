@@ -10,11 +10,14 @@ use move_binary_format::{
     },
 };
 use move_core_types::{gas_algebra::NumTypeNodes, value::MoveTypeLayout, vm_status::StatusCode};
-use move_vm_types::{gas::GasMeter, loaded_data::runtime_types::{AbilityInfo, StructType, Type}};
+use move_vm_types::{
+    gas::GasMeter,
+    loaded_data::runtime_types::{AbilityInfo, StructType, Type},
+};
 
 use super::{
     function::Function, loader_impl::MAX_TYPE_INSTANTIATION_NODES, module::Module, script::Script,
-    SessionStorage, Loader,
+    Loader, SessionStorage,
 };
 
 // A simple wrapper for a `Module` or a `Script` in the `Resolver`
@@ -184,7 +187,7 @@ impl<'a> Resolver<'a> {
                 let handle = &module.field_handles[idx.0 as usize];
 
                 Ok(handle.definition_struct_type.fields[handle.offset].clone())
-            },
+            }
             BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
         }
     }
@@ -204,7 +207,6 @@ impl<'a> Resolver<'a> {
             .iter()
             .map(|inst_ty| inst_ty.subst(ty_args))
             .collect::<PartialVMResult<Vec<_>>>()?;
-
 
         // TODO: Is this type substitution unbounded?
         field_instantiation.definition_struct_type.fields[field_instantiation.offset]
@@ -308,7 +310,7 @@ impl<'a> Resolver<'a> {
                     id: struct_.id.clone(),
                     ability: AbilityInfo::struct_(struct_.abilities),
                 })
-            },
+            }
             BinaryType::Script(_) => unreachable!("Scripts cannot have field instructions"),
         }
     }
@@ -337,7 +339,7 @@ impl<'a> Resolver<'a> {
                         struct_.phantom_ty_args_mask.clone(),
                     ),
                 })
-            },
+            }
             BinaryType::Script(_) => unreachable!("Scripts cannot have field instructions"),
         }
     }

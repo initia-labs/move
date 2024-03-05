@@ -43,7 +43,7 @@ impl<'r> SessionStorage for SessionCache<'r> {
             Some(checksum) => {
                 self.checksums.write().insert(module_id.clone(), checksum);
                 Ok(checksum)
-            },
+            }
             None => Err(
                 PartialVMError::new(StatusCode::LINKER_ERROR).with_message(format!(
                     "Linker Error: Cannot find {:?} in data cache",
@@ -105,10 +105,9 @@ impl<'r> SessionCache<'r> {
     ) -> PartialVMResult<()> {
         let module = self.deserialize_module(&module_blob)?;
         let arc_module = Arc::new(module);
-        self.modules.write().insert(
-            module_id.clone(),
-            (module_blob.len(), checksum.clone(), arc_module),
-        );
+        self.modules
+            .write()
+            .insert(module_id.clone(), (module_blob.len(), checksum, arc_module));
         self.checksums.write().insert(module_id.clone(), checksum);
 
         Ok(())
@@ -148,11 +147,11 @@ impl<'r> SessionCache<'r> {
                 let arc_module = Arc::new(module);
                 self.modules.write().insert(
                     module_id.clone(),
-                    (module_blob.len(), checksum.clone(), arc_module.clone()),
+                    (module_blob.len(), checksum, arc_module.clone()),
                 );
 
                 Ok((module_blob.len(), checksum, arc_module))
-            },
+            }
             None => Err(
                 PartialVMError::new(StatusCode::LINKER_ERROR).with_message(format!(
                     "Linker Error: Cannot find {:?} in data cache",
@@ -174,7 +173,7 @@ impl<'r> SessionCache<'r> {
     }
 
     fn deserialize_module(&self, module_blob: &Bytes) -> PartialVMResult<CompiledModule> {
-        CompiledModule::deserialize_with_config(&module_blob, &self.deserializer_config).map_err(
+        CompiledModule::deserialize_with_config(module_blob, &self.deserializer_config).map_err(
             |err| {
                 let msg = format!("Deserialization error: {:?}", err);
                 PartialVMError::new(StatusCode::CODE_DESERIALIZATION_ERROR).with_message(msg)

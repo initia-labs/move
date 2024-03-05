@@ -14,8 +14,8 @@ use std::{fmt::Debug, sync::Arc};
 use crate::native_functions::{NativeFunction, NativeFunctions, UnboxedNativeFunction};
 
 use super::{
-    access_specifier_loader::load_access_specifier, module::Module, resolver::Resolver,
-    SessionStorage, Loader,
+    access_specifier_loader::load_access_specifier, module::Module, resolver::Resolver, Loader,
+    SessionStorage,
 };
 
 // A simple wrapper for the "owner" of the function (Module or Script)
@@ -163,11 +163,11 @@ impl Function {
                     .expect("ModuleId on Function must exist")
                     .expect("ModuleId on Function must exist");
                 Resolver::for_module(loader, module)
-            },
+            }
             Scope::Script(script_hash) => {
                 let script = loader.get_script(script_hash);
                 Resolver::for_script(loader, script)
-            },
+            }
         }
     }
 
