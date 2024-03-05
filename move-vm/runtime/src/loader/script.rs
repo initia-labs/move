@@ -7,13 +7,16 @@ use move_binary_format::{
     file_format::{Bytecode, CompiledScript, FunctionDefinitionIndex, Signature, SignatureIndex},
 };
 use move_core_types::{identifier::Identifier, language_storage::ModuleId, vm_status::StatusCode};
-use move_vm_types::loaded_data::runtime_types::{Checksum, StructIdentifier, Type};
+use move_vm_types::loaded_data::{
+    runtime_access_specifier::AccessSpecifier,
+    runtime_types::{Checksum, StructIdentifier, Type},
+};
 
 use super::{
     cache::ModuleCache,
     function::{Function, FunctionHandle, FunctionInstantiation, Scope},
     type_loader::intern_type,
-    ChecksumStorage,
+    SessionStorage,
 };
 
 // A Script is very similar to a `CompiledScript` but data is "transformed" to a representation
@@ -49,7 +52,7 @@ impl Script {
         script: CompiledScript,
         script_hash: &Checksum,
         module_cache: &ModuleCache,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Self> {
         let mut struct_names = vec![];
         for struct_handle in script.struct_handles() {
@@ -62,7 +65,7 @@ impl Script {
                 name: struct_name.to_owned(),
             };
 
-            let checksum = checksum_storage.load_checksum(&module_id)?;
+            let checksum = session_storage.load_checksum(&module_id)?;
             module_cache
                 .get_struct_type_by_identifier(&checksum, &id)?
                 .check_compatibility(struct_handle)?;
@@ -147,6 +150,7 @@ impl Script {
             return_types: return_tys.clone(),
             local_types: local_tys,
             parameter_types: parameter_tys.clone(),
+            access_specifier: AccessSpecifier::Any,
         });
 
         let mut single_signature_token_map = BTreeMap::new();
@@ -171,7 +175,7 @@ impl Script {
                                                 expects one and only one signature token"
                                         .to_owned(),
                                 ));
-                            }
+                            },
                             Some(sig_token) => sig_token,
                         };
                         single_signature_token_map.insert(
@@ -179,8 +183,8 @@ impl Script {
                             intern_type(BinaryIndexedView::Script(&script), ty, &struct_names)?,
                         );
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
 

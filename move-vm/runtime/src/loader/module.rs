@@ -27,7 +27,7 @@ use super::{
     cache::ModuleCache,
     function::{Function, FunctionHandle, FunctionInstantiation},
     type_loader::intern_type,
-    ChecksumStorage,
+    SessionStorage,
 };
 
 // A Module is very similar to a binary Module but data is "transformed" to a representation
@@ -38,6 +38,9 @@ use super::{
 pub(crate) struct Module {
     pub(crate) id: ModuleId,
     pub(crate) checksum: Checksum,
+
+    // size in bytes
+    pub(crate) size: usize,
 
     // primitive pools
     pub(crate) module: Arc<CompiledModule>,
@@ -111,12 +114,13 @@ pub(crate) struct FieldInstantiation {
 impl Module {
     pub(crate) fn new(
         natives: &NativeFunctions,
-        module: CompiledModule,
+        size: usize,
+        module: Arc<CompiledModule>,
         module_cache: &ModuleCache,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Self> {
         let id = module.self_id();
-        let checksum = checksum_storage.load_checksum(&id)?;
+        let checksum = session_storage.load_checksum(&id)?;
 
         let mut structs = vec![];
         let mut struct_instantiations = vec![];
@@ -144,7 +148,7 @@ impl Module {
                 };
 
                 if module_handle != module.self_handle() {
-                    let checksum = checksum_storage.load_checksum(&module_id)?;
+                    let checksum = session_storage.load_checksum(&module_id)?;
                     module_cache
                         .get_struct_type_by_identifier(&checksum, &id)?
                         .check_compatibility(struct_handle)?;
@@ -191,11 +195,16 @@ impl Module {
 
             for (idx, func) in module.function_defs().iter().enumerate() {
                 let findex = FunctionDefinitionIndex(idx as TableIndex);
-                let function =
-                    match Function::new(natives, findex, &module, signature_table.as_slice()) {
-                        Ok(f) => f,
-                        Err(e) => return Err(e),
-                    };
+                let function = match Function::new(
+                    natives,
+                    findex,
+                    &module,
+                    signature_table.as_slice(),
+                    &struct_ids,
+                ) {
+                    Ok(f) => f,
+                    Err(e) => return Err(e),
+                };
 
                 function_map.insert(function.name.to_owned(), idx);
                 function_defs.push(Arc::new(function));
@@ -222,7 +231,7 @@ impl Module {
                                                 expects one and only one signature token"
                                                     .to_owned(),
                                             ));
-                                        }
+                                        },
                                         Some(sig_token) => sig_token,
                                     };
                                     single_signature_token_map.insert(
@@ -234,8 +243,8 @@ impl Module {
                                         )?,
                                     );
                                 }
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                     }
                 }
@@ -300,7 +309,8 @@ impl Module {
             Ok(_) => Ok(Self {
                 id,
                 checksum,
-                module: Arc::new(module),
+                size,
+                module,
                 structs,
                 struct_instantiations,
                 function_refs,

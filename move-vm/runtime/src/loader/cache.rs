@@ -3,7 +3,7 @@ use std::{collections::HashMap, num::NonZeroUsize, sync::Arc};
 use lru::LruCache;
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{
-    identifier::Identifier, language_storage::StructTag, value::MoveStructLayout,
+    identifier::Identifier, language_storage::StructTag, value::MoveTypeLayout,
     vm_status::StatusCode,
 };
 use move_vm_types::loaded_data::runtime_types::{
@@ -184,7 +184,7 @@ impl ScriptCache {
 pub(crate) struct StructInfoCache {
     pub(crate) struct_tag: Option<(StructTag, u64)>,
     pub(crate) struct_layout_info: Option<StructLayoutInfoCacheItem>,
-    pub(crate) annotated_struct_layout: Option<MoveStructLayout>,
+    pub(crate) annotated_struct_layout: Option<MoveTypeLayout>,
     pub(crate) annotated_node_count: Option<u64>,
 }
 
@@ -201,7 +201,7 @@ impl StructInfoCache {
 
 #[derive(Clone)]
 pub(crate) struct StructLayoutInfoCacheItem {
-    pub(crate) struct_layout: MoveStructLayout,
+    pub(crate) struct_layout: MoveTypeLayout,
     pub(crate) node_count: u64,
     pub(crate) has_identifier_mappings: bool,
 }

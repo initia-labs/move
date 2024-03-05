@@ -86,18 +86,24 @@ pub struct DeltaStorage<'a, 'b, S> {
 impl<'a, 'b, S: ModuleResolver> ModuleResolver for DeltaStorage<'a, 'b, S> {
     type Error = S::Error;
 
+    fn get_module_metadata(&self, _module_id: &ModuleId) -> Vec<Metadata> {
+        vec![]
+    }
+
     fn get_checksum(&self, module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
         if let Some(account_storage) = self.change_set.accounts().get(module_id.address()) {
-            if let Some(blob_opt) = account_storage.checksums().get(module_id.name()) {
-                return Ok(blob_opt.clone().ok());
+            if let Some(blob_op) = account_storage.modules().get(module_id.name()) {
+                return Ok(blob_op.map_ref(|blob| {
+                    let mut sha3_256 = Sha3_256::new();
+                    sha3_256.update(&blob);
+                    let checksum: [u8; 32] = sha3_256.finalize().into();
+
+                    checksum
+                }).ok())
             }
         }
 
         self.base.get_checksum(module_id)
-    }
-
-    fn get_module_metadata(&self, _module_id: &ModuleId) -> Vec<Metadata> {
-        vec![]
     }
 
     fn get_module(&self, module_id: &ModuleId) -> Result<Option<Bytes>, Self::Error> {
@@ -161,7 +167,6 @@ impl<'a, 'b, S: MoveResolver<PartialVMError>> DeltaStorage<'a, 'b, S> {
 struct InMemoryAccountStorage {
     resources: BTreeMap<StructTag, Bytes>,
     modules: BTreeMap<Identifier, Bytes>,
-    checksums: BTreeMap<Identifier, [u8; 32]>,
 }
 
 /// Simple in-memory storage that can be used as a Move VM storage backend for testing purposes.
@@ -191,16 +196,16 @@ where
                         entry.key()
                     )),
                 )
-            }
+            },
             (Occupied(entry), Delete) => {
                 entry.remove();
-            }
+            },
             (Occupied(entry), Modify(val)) => {
                 *entry.into_mut() = val;
-            }
+            },
             (Vacant(entry), New(val)) => {
                 entry.insert(val);
-            }
+            },
             (Vacant(entry), Delete | Modify(_)) => {
                 return Err(
                     PartialVMError::new(StatusCode::STORAGE_ERROR).with_message(format!(
@@ -208,7 +213,7 @@ where
                         entry.key()
                     )),
                 )
-            }
+            },
         }
     }
     Ok(())
@@ -229,9 +234,8 @@ where
 
 impl InMemoryAccountStorage {
     fn apply(&mut self, account_changeset: AccountChangeSet) -> PartialVMResult<()> {
-        let (modules, checksums, resources) = account_changeset.into_inner();
+        let (modules, resources) = account_changeset.into_inner();
         apply_changes(&mut self.modules, modules)?;
-        apply_changes(&mut self.checksums, checksums)?;
         apply_changes(&mut self.resources, resources)?;
         Ok(())
     }
@@ -239,7 +243,6 @@ impl InMemoryAccountStorage {
     fn new() -> Self {
         Self {
             modules: BTreeMap::new(),
-            checksums: BTreeMap::new(),
             resources: BTreeMap::new(),
         }
     }
@@ -255,12 +258,12 @@ impl InMemoryStorage {
             match self.accounts.entry(addr) {
                 btree_map::Entry::Occupied(entry) => {
                     entry.into_mut().apply(account_changeset)?;
-                }
+                },
                 btree_map::Entry::Vacant(entry) => {
                     let mut account_storage = InMemoryAccountStorage::new();
                     account_storage.apply(account_changeset)?;
                     entry.insert(account_storage);
-                }
+                },
             }
         }
 
@@ -311,19 +314,9 @@ impl InMemoryStorage {
         let account = get_or_insert(&mut self.accounts, *module_id.address(), || {
             InMemoryAccountStorage::new()
         });
-
-        // compute checksum
-        let mut sha3_256 = Sha3_256::new();
-        sha3_256.update(&blob);
-        let checksum: [u8; 32] = sha3_256.finalize().into();
-
         account
             .modules
             .insert(module_id.name().to_owned(), blob.into());
-
-        account
-            .checksums
-            .insert(module_id.name().to_owned(), checksum.into());
     }
 
     pub fn publish_or_overwrite_resource(
@@ -342,7 +335,18 @@ impl ModuleResolver for InMemoryStorage {
 
     fn get_checksum(&self, module_id: &ModuleId) -> Result<Option<[u8; 32]>, Self::Error> {
         if let Some(account_storage) = self.accounts.get(module_id.address()) {
-            return Ok(account_storage.checksums.get(module_id.name()).cloned());
+            match account_storage.modules.get(module_id.name()) {
+                Some(blob) => {
+                    let mut sha3_256 = Sha3_256::new();
+                    sha3_256.update(&blob);
+                    let checksum: [u8; 32] = sha3_256.finalize().into();
+
+                    return Ok(Some(checksum));
+                },
+                None => {
+                    return Ok(None);
+                },
+            }
         }
         Ok(None)
     }

@@ -24,11 +24,7 @@ use crate::{
 use codespan_reporting::diagnostic::Severity;
 use itertools::Itertools;
 use move_binary_format::file_format::{AbilitySet, Visibility};
-use move_compiler::{
-    expansion::ast::{self as EA},
-    parser::ast as PA,
-    shared::NumericalAddress,
-};
+use move_compiler::{expansion::ast as EA, parser::ast as PA, shared::NumericalAddress};
 use move_core_types::account_address::AccountAddress;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,7 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) struct ModelBuilder<'env> {
     /// The global environment we are building.
     pub env: &'env mut GlobalEnv,
-    /// A symbol table for specification functions. Because of overloading, and entry can
+    /// A symbol table for specification functions. Because of overloading, an entry can
     /// contain multiple functions.
     pub spec_fun_table: BTreeMap<QualifiedSymbol, Vec<SpecOrBuiltinFunEntry>>,
     /// A symbol table for specification variables.
@@ -132,7 +128,8 @@ pub(crate) struct StructEntry {
 /// A declaration of a function.
 #[derive(Debug, Clone)]
 pub(crate) struct FunEntry {
-    pub loc: Loc,
+    pub loc: Loc,      // location of the entire function span
+    pub name_loc: Loc, // location of just the function name
     pub module_id: ModuleId,
     pub fun_id: FunId,
     pub visibility: Visibility,
@@ -165,6 +162,16 @@ impl AnyFunEntry {
             AnyFunEntry::SpecOrBuiltin(e) => e.oper.clone(),
             AnyFunEntry::UserFun(e) => Operation::MoveFunction(e.module_id, e.fun_id),
         }
+    }
+
+    pub fn is_equality_on_ref(&self) -> bool {
+        matches!(self.get_operation(), Operation::Eq | Operation::Neq)
+            && self.get_signature().1[0].1.is_reference()
+    }
+
+    pub fn is_equality_on_non_ref(&self) -> bool {
+        matches!(self.get_operation(), Operation::Eq | Operation::Neq)
+            && !self.get_signature().1[0].1.is_reference()
     }
 }
 
@@ -421,7 +428,7 @@ impl<'env> ModelBuilder<'env> {
             gen_get_ty_param_kinds(ty_params),
             self.gen_get_struct_sig(),
             loc,
-            |loc, err| self.error(loc, err),
+            |loc, _, err| self.error(loc, err),
         );
     }
 

@@ -9,12 +9,12 @@ use move_binary_format::{
         StructDefInstantiationIndex, StructDefinitionIndex,
     },
 };
-use move_core_types::{value::MoveTypeLayout, vm_status::StatusCode};
-use move_vm_types::loaded_data::runtime_types::{AbilityInfo, StructType, Type};
+use move_core_types::{gas_algebra::NumTypeNodes, value::MoveTypeLayout, vm_status::StatusCode};
+use move_vm_types::{gas::GasMeter, loaded_data::runtime_types::{AbilityInfo, StructType, Type}};
 
 use super::{
     function::Function, loader_impl::MAX_TYPE_INSTANTIATION_NODES, module::Module, script::Script,
-    ChecksumStorage, Loader,
+    SessionStorage, Loader,
 };
 
 // A simple wrapper for a `Module` or a `Script` in the `Resolver`
@@ -60,44 +60,53 @@ impl<'a> Resolver<'a> {
     pub(crate) fn function_from_handle(
         &self,
         idx: FunctionHandleIndex,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Arc<Function>> {
         let idx = match &self.binary {
             BinaryType::Module(module) => module.function_at(idx.0),
             BinaryType::Script(script) => script.function_at(idx.0),
         };
-        self.loader.function_at(idx, checksum_storage)
+        self.loader.function_at(idx, session_storage)
     }
 
     pub(crate) fn function_from_instantiation(
         &self,
         idx: FunctionInstantiationIndex,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Arc<Function>> {
         let func_inst = match &self.binary {
             BinaryType::Module(module) => module.function_instantiation_at(idx.0),
             BinaryType::Script(script) => script.function_instantiation_at(idx.0),
         };
-        self.loader.function_at(&func_inst.handle, checksum_storage)
+        self.loader.function_at(&func_inst.handle, session_storage)
     }
 
     pub(crate) fn instantiate_generic_function(
         &self,
+        gas_meter: Option<&mut impl GasMeter>,
         idx: FunctionInstantiationIndex,
-        type_params: &[Type],
+        ty_args: &[Type],
     ) -> PartialVMResult<Vec<Type>> {
         let func_inst = match &self.binary {
             BinaryType::Module(module) => module.function_instantiation_at(idx.0),
             BinaryType::Script(script) => script.function_instantiation_at(idx.0),
         };
+
+        if let Some(gas_meter) = gas_meter {
+            for ty in &func_inst.instantiation {
+                gas_meter
+                    .charge_create_ty(NumTypeNodes::new(ty.num_nodes_in_subst(ty_args)? as u64))?;
+            }
+        }
+
         let mut instantiation = vec![];
         for ty in &func_inst.instantiation {
-            instantiation.push(self.subst(ty, type_params)?);
+            instantiation.push(self.subst(ty, ty_args)?);
         }
         // Check if the function instantiation over all generics is larger
         // than MAX_TYPE_INSTANTIATION_NODES.
         let mut sum_nodes = 1u64;
-        for ty in type_params.iter().chain(instantiation.iter()) {
+        for ty in ty_args.iter().chain(instantiation.iter()) {
             sum_nodes = sum_nodes.saturating_add(self.loader.count_type_nodes(ty));
             if sum_nodes > MAX_TYPE_INSTANTIATION_NODES {
                 return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
@@ -175,7 +184,7 @@ impl<'a> Resolver<'a> {
                 let handle = &module.field_handles[idx.0 as usize];
 
                 Ok(handle.definition_struct_type.fields[handle.offset].clone())
-            }
+            },
             BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
         }
     }
@@ -195,6 +204,9 @@ impl<'a> Resolver<'a> {
             .iter()
             .map(|inst_ty| inst_ty.subst(ty_args))
             .collect::<PartialVMResult<Vec<_>>>()?;
+
+
+        // TODO: Is this type substitution unbounded?
         field_instantiation.definition_struct_type.fields[field_instantiation.offset]
             .subst(&instantiation_types)
     }
@@ -296,7 +308,7 @@ impl<'a> Resolver<'a> {
                     id: struct_.id.clone(),
                     ability: AbilityInfo::struct_(struct_.abilities),
                 })
-            }
+            },
             BinaryType::Script(_) => unreachable!("Scripts cannot have field instructions"),
         }
     }
@@ -308,11 +320,13 @@ impl<'a> Resolver<'a> {
     ) -> PartialVMResult<Type> {
         match &self.binary {
             BinaryType::Module(module) => {
-                let struct_ = &module.field_instantiations[idx.0 as usize].definition_struct_type;
+                let field_inst = &module.field_instantiations[idx.0 as usize];
+                let struct_ = &field_inst.definition_struct_type;
+
                 Ok(Type::StructInstantiation {
                     id: struct_.id.clone(),
                     ty_args: triomphe::Arc::new(
-                        module.field_instantiations[idx.0 as usize]
+                        field_inst
                             .instantiation
                             .iter()
                             .map(|ty| ty.subst(args))
@@ -323,7 +337,7 @@ impl<'a> Resolver<'a> {
                         struct_.phantom_ty_args_mask.clone(),
                     ),
                 })
-            }
+            },
             BinaryType::Script(_) => unreachable!("Scripts cannot have field instructions"),
         }
     }
@@ -331,27 +345,27 @@ impl<'a> Resolver<'a> {
     pub(crate) fn type_to_type_layout(
         &self,
         ty: &Type,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<MoveTypeLayout> {
-        self.loader.type_to_type_layout(ty, checksum_storage)
+        self.loader.type_to_type_layout(ty, session_storage)
     }
 
     pub(crate) fn type_to_type_layout_with_identifier_mappings(
         &self,
         ty: &Type,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<(MoveTypeLayout, bool)> {
         self.loader
-            .type_to_type_layout_with_identifier_mappings(ty, checksum_storage)
+            .type_to_type_layout_with_identifier_mappings(ty, session_storage)
     }
 
     pub(crate) fn type_to_fully_annotated_layout(
         &self,
         ty: &Type,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<MoveTypeLayout> {
         self.loader
-            .type_to_fully_annotated_layout(ty, checksum_storage)
+            .type_to_fully_annotated_layout(ty, session_storage)
     }
 
     // get the loader

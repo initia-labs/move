@@ -1,8 +1,10 @@
 use std::{
     collections::{btree_map, BTreeMap, BTreeSet},
+    num::NonZeroUsize,
     sync::Arc,
 };
 
+use lazy_static::lazy_static;
 use move_binary_format::{
     access::{ModuleAccess, ScriptAccess},
     errors::{verification_error, Location, PartialVMError, PartialVMResult, VMResult},
@@ -14,21 +16,26 @@ use move_binary_format::{
 use move_bytecode_verifier::{cyclic_dependencies, dependencies};
 use move_core_types::{
     account_address::AccountAddress,
+    gas_algebra::NumBytes,
     ident_str,
     identifier::IdentStr,
     language_storage::{ModuleId, StructTag, TypeTag},
-    value::{IdentifierMappingKind, LayoutTag, MoveFieldLayout, MoveStructLayout, MoveTypeLayout},
+    value::{IdentifierMappingKind, MoveFieldLayout, MoveStructLayout, MoveTypeLayout},
     vm_status::StatusCode,
 };
-use move_vm_types::loaded_data::runtime_types::{
-    AbilityInfo, Checksum, DepthFormula, StructIdentifier, StructType, Type,
+use move_vm_types::{
+    gas::GasMeter,
+    loaded_data::runtime_types::{
+        AbilityInfo, Checksum, DepthFormula, StructIdentifier, StructType, Type,
+    },
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use sha3::{Digest, Sha3_256};
+use typed_arena::Arena;
 
 use crate::{
-    config::VMConfig, logging::expect_no_verification_errors, native_functions::NativeFunctions,
-    session::LoadedFunctionInstantiation,
+    config::VMConfig, logging::expect_no_verification_errors, module_traversal::TraversalContext,
+    native_functions::NativeFunctions, session::LoadedFunctionInstantiation,
 };
 
 use super::{
@@ -36,9 +43,18 @@ use super::{
     function::{Function, FunctionHandle, LoadedFunction},
     module::Module,
     script::Script,
-    store::ModuleStorage,
-    ChecksumStorage,
+    SessionStorage,
 };
+
+// Max number of modules that can skip re-verification.
+const VERIFIED_CACHE_SIZE: usize = 100_000;
+
+// Cache for already verified modules
+lazy_static! {
+    static ref VERIFIED_MODULES: Mutex<lru::LruCache<[u8; 32], ()>> = Mutex::new(
+        lru::LruCache::new(NonZeroUsize::new(VERIFIED_CACHE_SIZE).unwrap())
+    );
+}
 
 // A Loader is responsible to load scripts and modules and holds the cache of all loaded
 // entities. Each cache is protected by a `RwLock`. Operation in the Loader must be thread safe
@@ -94,8 +110,7 @@ impl Loader {
         &self,
         script_blob: &[u8],
         ty_args: &[TypeTag],
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<(Arc<Function>, LoadedFunctionInstantiation)> {
         // retrieve or load the script
         let mut sha3_256 = Sha3_256::new();
@@ -108,18 +123,15 @@ impl Loader {
                 self.script_cache_hits.write().record_hit(&checksum);
 
                 cached
-            }
+            },
             None => {
-                let ver_script = self.deserialize_and_verify_script(
-                    script_blob,
-                    module_storage,
-                    checksum_storage,
-                )?;
+                let ver_script =
+                    self.deserialize_and_verify_script(script_blob, session_storage)?;
                 let script = Script::new(
                     ver_script,
                     &checksum,
                     &self.module_cache.read(),
-                    checksum_storage,
+                    session_storage,
                 )
                 .map_err(|e| e.finish(Location::Script))?;
 
@@ -132,7 +144,7 @@ impl Loader {
                 }
 
                 cached
-            }
+            },
         };
 
         // explicitly drop
@@ -141,7 +153,7 @@ impl Loader {
         // verify type arguments
         let mut type_arguments = vec![];
         for ty in ty_args {
-            type_arguments.push(self.load_type(ty, module_storage, checksum_storage)?);
+            type_arguments.push(self.load_type(ty, session_storage)?);
         }
 
         if self.vm_config.type_size_limit
@@ -173,8 +185,7 @@ impl Loader {
     fn deserialize_and_verify_script(
         &self,
         script: &[u8],
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<CompiledScript> {
         let script = match CompiledScript::deserialize_with_config(
             script,
@@ -186,7 +197,7 @@ impl Loader {
                 return Err(PartialVMError::new(StatusCode::CODE_DESERIALIZATION_ERROR)
                     .with_message(msg)
                     .finish(Location::Script));
-            }
+            },
         };
 
         match self.verify_script(&script) {
@@ -195,11 +206,11 @@ impl Loader {
                 let loaded_deps = script
                     .immediate_dependencies()
                     .into_iter()
-                    .map(|module_id| self.load_module(&module_id, module_storage, checksum_storage))
+                    .map(|module_id| self.load_module(&module_id, session_storage))
                     .collect::<VMResult<_>>()?;
                 self.verify_script_dependencies(&script, loaded_deps)?;
                 Ok(script)
-            }
+            },
             Err(err) => Err(err),
         }
     }
@@ -228,16 +239,43 @@ impl Loader {
     // Module verification and loading
     //
 
+    fn load_compiled_module(
+        &self,
+        id: &ModuleId,
+        session_storage: &dyn SessionStorage,
+        allow_loading_failure: bool,
+    ) -> VMResult<(usize, Checksum, Arc<CompiledModule>)> {
+        // if the module is already in the code cache, load the cached version
+        let checksum = session_storage
+            .load_checksum(id)
+            .map_err(|e| e.finish(Location::Module(id.clone())))?;
+
+        if let Some(cached) = self.module_cache.read().get(&checksum) {
+            self.module_cache_hits.write().record_hit(&checksum);
+            return Ok((cached.size, checksum, cached.module.clone()));
+        }
+
+        match session_storage.load_module(id) {
+            Ok(data) => Ok(data),
+            Err(err) if err.major_status() == StatusCode::CODE_DESERIALIZATION_ERROR => Err(
+                expect_no_verification_errors(err.finish(Location::Module(id.clone()))),
+            ),
+            Err(err) if allow_loading_failure => Err(err.finish(Location::Undefined)),
+            Err(err) => Err(expect_no_verification_errors(
+                err.finish(Location::Undefined),
+            )),
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     // Loading verifies the module if it was never loaded.
     fn load_function_without_type_args(
         &self,
         module_id: &ModuleId,
         function_name: &IdentStr,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<(Arc<Module>, Arc<Function>, Vec<Type>, Vec<Type>)> {
-        let module = self.load_module(module_id, module_storage, checksum_storage)?;
+        let module = self.load_module(module_id, session_storage)?;
         let func = module
             .resolve_function_by_name(function_name)
             .map_err(|e| e.finish(Location::Undefined))?;
@@ -261,17 +299,17 @@ impl Loader {
                 btree_map::Entry::Vacant(vacant_entry) => {
                     vacant_entry.insert(expected);
                     true
-                }
+                },
                 btree_map::Entry::Occupied(occupied_entry) => *occupied_entry.get() == expected,
             },
             // Recursive types we need to recurse the matching types
             (Type::Reference(ret_inner), Type::Reference(expected_inner))
             | (Type::MutableReference(ret_inner), Type::MutableReference(expected_inner)) => {
                 Self::match_return_type(ret_inner, expected_inner, map)
-            }
+            },
             (Type::Vector(ret_inner), Type::Vector(expected_inner)) => {
                 Self::match_return_type(ret_inner, expected_inner, map)
-            }
+            },
             // Abilities should not contribute to the equality check as they just serve for caching computations.
             // For structs the both need to be the same struct.
             (
@@ -299,7 +337,7 @@ impl Loader {
                         .iter()
                         .zip(expected_fields.iter())
                         .all(|types| Self::match_return_type(types.0, types.1, map))
-            }
+            },
             // For primitive types we need to assure the types match
             (Type::U8, Type::U8)
             | (Type::U16, Type::U16)
@@ -339,15 +377,10 @@ impl Loader {
         module_id: &ModuleId,
         function_name: &IdentStr,
         expected_return_type: &Type,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<(LoadedFunction, LoadedFunctionInstantiation)> {
-        let (module, func, parameters, return_vec) = self.load_function_without_type_args(
-            module_id,
-            function_name,
-            module_storage,
-            checksum_storage,
-        )?;
+        let (module, func, parameters, return_vec) =
+            self.load_function_without_type_args(module_id, function_name, session_storage)?;
 
         if return_vec.len() != 1 {
             // For functions that are marked constructor this should not happen.
@@ -406,19 +439,14 @@ impl Loader {
         module_id: &ModuleId,
         function_name: &IdentStr,
         ty_args: &[TypeTag],
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<(Arc<Module>, Arc<Function>, LoadedFunctionInstantiation)> {
-        let (module, func, parameters, return_) = self.load_function_without_type_args(
-            module_id,
-            function_name,
-            module_storage,
-            checksum_storage,
-        )?;
+        let (module, func, parameters, return_) =
+            self.load_function_without_type_args(module_id, function_name, session_storage)?;
 
         let type_arguments = ty_args
             .iter()
-            .map(|ty| self.load_type(ty, module_storage, checksum_storage))
+            .map(|ty| self.load_type(ty, session_storage))
             .collect::<VMResult<Vec<_>>>()
             .map_err(|mut err| {
                 // User provided type arguement failed to load. Set extra sub status to distinguish from internal type loading error.
@@ -447,8 +475,7 @@ impl Loader {
     pub(crate) fn verify_module_bundle_for_publication(
         &self,
         modules: &[CompiledModule],
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<()> {
         fail::fail_point!("verifier-failpoint-1", |_| { Ok(()) });
 
@@ -462,8 +489,7 @@ impl Loader {
                 module,
                 &bundle_verified,
                 &bundle_unverified,
-                module_storage,
-                checksum_storage,
+                session_storage,
             )?;
             bundle_verified.insert(module_id.clone(), module.clone());
         }
@@ -486,8 +512,7 @@ impl Loader {
         module: &CompiledModule,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<()> {
         // Performs all verification steps to load the module without loading it, i.e., the new
         // module will NOT show up in `module_cache`. In the module republishing case, it means
@@ -507,8 +532,7 @@ impl Loader {
         self.load_and_verify_dependencies(
             module,
             bundle_verified,
-            module_storage,
-            checksum_storage,
+            session_storage,
             &mut visited,
             &mut friends_discovered,
             /* allow_dependency_loading_failure */ true,
@@ -522,15 +546,14 @@ impl Loader {
             friends_discovered,
             bundle_verified,
             bundle_unverified,
-            module_storage,
-            checksum_storage,
+            session_storage,
             /* allow_friend_loading_failure */ true,
             /* dependencies_depth */ 0,
         )?;
 
         // make sure there is no cyclic dependency
         self.verify_module_cyclic_relations(
-            checksum_storage,
+            session_storage,
             module,
             bundle_verified,
             bundle_unverified,
@@ -539,7 +562,7 @@ impl Loader {
 
     fn verify_module_cyclic_relations(
         &self,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
         module: &CompiledModule,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
@@ -551,11 +574,11 @@ impl Loader {
                 match bundle_verified.get(module_id) {
                     Some(m) => Some(m.immediate_dependencies()),
                     None => {
-                        let checksum = checksum_storage.load_checksum(module_id)?;
+                        let checksum = session_storage.load_checksum(module_id)?;
                         locked_module_cache
                             .get(&checksum)
                             .map(|m| m.compiled_module().immediate_dependencies())
-                    }
+                    },
                 }
                 .ok_or_else(|| PartialVMError::new(StatusCode::MISSING_DEPENDENCY))
             },
@@ -571,11 +594,11 @@ impl Loader {
                     match bundle_verified.get(module_id) {
                         Some(m) => Some(m.immediate_friends()),
                         None => {
-                            let checksum = checksum_storage.load_checksum(module_id)?;
+                            let checksum = session_storage.load_checksum(module_id)?;
                             locked_module_cache
                                 .get(&checksum)
                                 .map(|m| m.compiled_module().immediate_friends())
-                        }
+                        },
                     }
                     .ok_or_else(|| PartialVMError::new(StatusCode::MISSING_DEPENDENCY))
                 }
@@ -608,8 +631,7 @@ impl Loader {
     pub(crate) fn load_type(
         &self,
         type_tag: &TypeTag,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<Type> {
         Ok(match type_tag {
             TypeTag::Bool => Type::Bool,
@@ -621,14 +643,12 @@ impl Loader {
             TypeTag::U256 => Type::U256,
             TypeTag::Address => Type::Address,
             TypeTag::Signer => Type::Signer,
-            TypeTag::Vector(tt) => Type::Vector(triomphe::Arc::new(self.load_type(
-                tt,
-                module_storage,
-                checksum_storage,
-            )?)),
+            TypeTag::Vector(tt) => {
+                Type::Vector(triomphe::Arc::new(self.load_type(tt, session_storage)?))
+            },
             TypeTag::Struct(struct_tag) => {
                 let module_id = ModuleId::new(struct_tag.address, struct_tag.module.clone());
-                let module = self.load_module(&module_id, module_storage, checksum_storage)?;
+                let module = self.load_module(&module_id, session_storage)?;
                 let struct_type = module
                     .get_struct_type_by_identifier(&struct_tag.name)
                     .map_err(|e| e.finish(Location::Undefined))?;
@@ -640,11 +660,7 @@ impl Loader {
                 } else {
                     let mut type_params = vec![];
                     for ty_param in &struct_tag.type_params {
-                        type_params.push(self.load_type(
-                            ty_param,
-                            module_storage,
-                            checksum_storage,
-                        )?);
+                        type_params.push(self.load_type(ty_param, session_storage)?);
                     }
                     self.verify_ty_args(struct_type.type_param_constraints(), &type_params)
                         .map_err(|e| e.finish(Location::Undefined))?;
@@ -657,7 +673,7 @@ impl Loader {
                         ),
                     }
                 }
-            }
+            },
         })
     }
 
@@ -666,16 +682,9 @@ impl Loader {
     pub(crate) fn load_module(
         &self,
         id: &ModuleId,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<Arc<Module>> {
-        self.load_module_internal(
-            id,
-            &BTreeMap::new(),
-            &BTreeSet::new(),
-            module_storage,
-            checksum_storage,
-        )
+        self.load_module_internal(id, &BTreeMap::new(), &BTreeSet::new(), session_storage)
     }
 
     // The interface to cleanup the unused modules from the cache.
@@ -731,11 +740,10 @@ impl Loader {
         id: &ModuleId,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<Arc<Module>> {
         // if the module is already in the code cache, load the cached version
-        let checksum = checksum_storage
+        let checksum = session_storage
             .load_checksum(id)
             .map_err(|e| e.finish(Location::Undefined))?;
 
@@ -754,15 +762,14 @@ impl Loader {
             id,
             bundle_verified,
             bundle_unverified,
-            module_storage,
-            checksum_storage,
+            session_storage,
             /* allow_module_loading_failure */ true,
             /* dependencies_depth */ 0,
         )?;
 
         // verify that the transitive closure does not have cycles
         self.verify_module_cyclic_relations(
-            checksum_storage,
+            session_storage,
             module_ref.compiled_module(),
             bundle_verified,
             bundle_unverified,
@@ -775,34 +782,13 @@ impl Loader {
     fn load_and_verify_module(
         &self,
         id: &ModuleId,
-        module_storage: &dyn ModuleStorage,
+        session_storage: &dyn SessionStorage,
         allow_loading_failure: bool,
-    ) -> VMResult<CompiledModule> {
-        // bytes fetching, allow loading to fail if the flag is set
-        let bytes = match module_storage
-            .load_module(id)
-            .map_err(|e| e.finish(Location::Undefined))
-        {
-            Ok(bytes) => bytes,
-            Err(err) if allow_loading_failure => return Err(err),
-            Err(err) => {
-                return Err(expect_no_verification_errors(err));
-            }
-        };
+    ) -> VMResult<(usize, Arc<CompiledModule>)> {
+        let (size, checksum, module) =
+            self.load_compiled_module(id, session_storage, allow_loading_failure)?;
 
-        // for bytes obtained from the data store, they should always deserialize and verify.
-        // It is an invariant violation if they don't.
-        let module =
-            CompiledModule::deserialize_with_config(&bytes, &self.vm_config.deserializer_config)
-                .map_err(|err| {
-                    let msg = format!("Deserialization error: {:?}", err);
-                    PartialVMError::new(StatusCode::CODE_DESERIALIZATION_ERROR)
-                        .with_message(msg)
-                        .finish(Location::Module(id.clone()))
-                })
-                .map_err(expect_no_verification_errors)?;
-
-        fail::fail_point!("verifier-failpoint-2", |_| { Ok(module.clone()) });
+        fail::fail_point!("verifier-failpoint-2", |_| { Ok((size, module.clone())) });
 
         if self.vm_config.paranoid_type_checks && &module.self_id() != id {
             return Err(
@@ -812,12 +798,16 @@ impl Loader {
             );
         }
 
-        // bytecode verifier checks that can be performed with the module itself
-        move_bytecode_verifier::verify_module_with_config(&self.vm_config.verifier, &module)
-            .map_err(expect_no_verification_errors)?;
+        if VERIFIED_MODULES.lock().get(&checksum).is_none() {
+            move_bytecode_verifier::verify_module_with_config(&self.vm_config.verifier, &module)
+                .map_err(expect_no_verification_errors)?;
+
+            VERIFIED_MODULES.lock().put(checksum, ());
+        }
+
         self.check_natives(&module)
             .map_err(expect_no_verification_errors)?;
-        Ok(module)
+        Ok((size, module))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -827,8 +817,7 @@ impl Loader {
         &self,
         id: &ModuleId,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
         visited: &mut BTreeSet<ModuleId>,
         friends_discovered: &mut BTreeSet<ModuleId>,
         allow_module_loading_failure: bool,
@@ -841,18 +830,17 @@ impl Loader {
         }
 
         // module self-check
-        let module =
-            self.load_and_verify_module(id, module_storage, allow_module_loading_failure)?;
+        let (size, module) =
+            self.load_and_verify_module(id, session_storage, allow_module_loading_failure)?;
         visited.insert(id.clone());
         friends_discovered.extend(module.immediate_friends());
 
         // downward exploration of the module's dependency graph. For a module that is loaded from
-        // the module_storage, we should never allow its dependencies to fail to load.
+        // the session_storage, we should never allow its dependencies to fail to load.
         self.load_and_verify_dependencies(
             &module,
             bundle_verified,
-            module_storage,
-            checksum_storage,
+            session_storage,
             visited,
             friends_discovered,
             /* allow_dependency_loading_failure */ false,
@@ -863,9 +851,10 @@ impl Loader {
         let mut locked_module_cache = self.module_cache.write();
         let module = Module::new(
             &self.natives,
+            size,
             module,
             &locked_module_cache,
-            checksum_storage,
+            session_storage,
         )
         .map_err(|e| e.finish(Location::Undefined))?;
 
@@ -886,8 +875,7 @@ impl Loader {
         &self,
         module: &CompiledModule,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
         visited: &mut BTreeSet<ModuleId>,
         friends_discovered: &mut BTreeSet<ModuleId>,
         allow_dependency_loading_failure: bool,
@@ -911,9 +899,13 @@ impl Loader {
             if let Some(cached) = bundle_verified.get(&module_id) {
                 bundle_deps.push(cached);
             } else {
-                let checksum = checksum_storage
-                    .load_checksum(&module_id)
-                    .map_err(|e| e.finish(Location::Undefined))?;
+                let checksum = session_storage.load_checksum(&module_id).map_err(|e| {
+                    if allow_dependency_loading_failure {
+                        e.finish(Location::Undefined)
+                    } else {
+                        expect_no_verification_errors(e.finish(Location::Undefined))
+                    }
+                })?;
 
                 let locked_cache = self.module_cache.read();
                 let loaded = match locked_cache.get(&checksum) {
@@ -922,14 +914,13 @@ impl Loader {
                         self.load_and_verify_module_and_dependencies(
                             &module_id,
                             bundle_verified,
-                            module_storage,
-                            checksum_storage,
+                            session_storage,
                             visited,
                             friends_discovered,
                             allow_dependency_loading_failure,
                             dependencies_depth + 1,
                         )?
-                    }
+                    },
                     Some(cached) => cached,
                 };
                 cached_deps.push(loaded);
@@ -962,8 +953,7 @@ impl Loader {
         id: &ModuleId,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
         allow_module_loading_failure: bool,
         dependencies_depth: usize,
     ) -> VMResult<Arc<Module>> {
@@ -973,8 +963,7 @@ impl Loader {
         let module_ref = self.load_and_verify_module_and_dependencies(
             id,
             bundle_verified,
-            module_storage,
-            checksum_storage,
+            session_storage,
             &mut visited,
             &mut friends_discovered,
             allow_module_loading_failure,
@@ -982,14 +971,13 @@ impl Loader {
         )?;
 
         // upward exploration of the module's friendship graph and expand the friendship frontier.
-        // For a module that is loaded from the module_storage, we should never allow that its friends
+        // For a module that is loaded from the session_storage, we should never allow that its friends
         // fail to load.
         self.load_and_verify_friends(
             friends_discovered,
             bundle_verified,
             bundle_unverified,
-            module_storage,
-            checksum_storage,
+            session_storage,
             /* allow_friend_loading_failure */ false,
             dependencies_depth,
         )?;
@@ -1003,8 +991,7 @@ impl Loader {
         friends_discovered: BTreeSet<ModuleId>,
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
         allow_friend_loading_failure: bool,
         dependencies_depth: usize,
     ) -> VMResult<()> {
@@ -1034,10 +1021,16 @@ impl Loader {
         let new_imm_friends: Vec<_> = friends_discovered
             .into_iter()
             .map(|mid| {
-                checksum_storage
+                session_storage
                     .load_checksum(&mid)
                     .map(|checksum| (mid.clone(), checksum))
-                    .map_err(|e| e.finish(Location::Undefined))
+                    .map_err(|e| {
+                        if allow_friend_loading_failure {
+                            e.finish(Location::Undefined)
+                        } else {
+                            expect_no_verification_errors(e.finish(Location::Undefined))
+                        }
+                    })
             })
             .collect::<VMResult<Vec<(ModuleId, Checksum)>>>()?
             .into_iter()
@@ -1054,8 +1047,7 @@ impl Loader {
                 &module_id,
                 bundle_verified,
                 bundle_unverified,
-                module_storage,
-                checksum_storage,
+                session_storage,
                 allow_friend_loading_failure,
                 dependencies_depth + 1,
             )?;
@@ -1078,7 +1070,7 @@ impl Loader {
                 {
                     return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
                 }
-            }
+            },
             Type::StructInstantiation {
                 ty_args: struct_inst,
                 ..
@@ -1090,7 +1082,7 @@ impl Loader {
                         return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
                     }
                 }
-            }
+            },
             Type::Address
             | Type::Bool
             | Type::Signer
@@ -1135,12 +1127,12 @@ impl Loader {
     pub(crate) fn function_at(
         &self,
         handle: &FunctionHandle,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Arc<Function>> {
         match handle {
             FunctionHandle::Local(func) => Ok(func.clone()),
             FunctionHandle::Remote { module_id, name } => {
-                self.get_module(module_id, checksum_storage)?
+                self.get_module(module_id, session_storage)?
                     .and_then(|module| {
                         let idx = module.function_map.get(name)?;
                         module.function_defs.get(*idx).cloned()
@@ -1150,16 +1142,16 @@ impl Loader {
                             format!("Failed to resolve function: {:?}::{:?}", module_id, name),
                         )
                     })
-            }
+            },
         }
     }
 
     pub(crate) fn get_module(
         &self,
         id: &ModuleId,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Option<Arc<Module>>> {
-        let checksum = checksum_storage.load_checksum(id)?;
+        let checksum = session_storage.load_checksum(id)?;
         Ok(self.module_cache.read().get(&checksum))
     }
 
@@ -1173,15 +1165,152 @@ impl Loader {
     pub(crate) fn get_struct_type_by_identifier(
         &self,
         id: &StructIdentifier,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Arc<StructType>> {
-        let checksum = checksum_storage.load_checksum(&id.module_id)?;
+        let checksum = session_storage.load_checksum(&id.module_id)?;
         let module = self.module_cache.read().get(&checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
                 .with_message(format!("Cannot find {:?} in cache", checksum))
         })?;
 
         module.get_struct_type_by_identifier(&id.name)
+    }
+
+    /// Traverses the whole transitive closure of dependencies, starting from the specified
+    /// modules and performs gas metering.
+    ///
+    /// The traversal follows a depth-first order, with the module itself being visited first,
+    /// followed by its dependencies, and finally its friends.
+    /// DO NOT CHANGE THE ORDER unless you have a good reason, or otherwise this could introduce
+    /// a breaking change to the gas semantics.
+    ///
+    /// This will result in the shallow-loading of the modules -- they will be read from the
+    /// storage as bytes and then deserialized, but NOT converted into the runtime representation.
+    ///
+    /// It should also be noted that this is implemented in a way that avoids the cloning of
+    /// `ModuleId`, a.k.a. heap allocations, as much as possible, which is critical for
+    /// performance.
+    ///
+    /// TODO: Revisit the order of traversal. Consider switching to alphabetical order.
+    pub(crate) fn check_dependencies_and_charge_gas<'a, I>(
+        &self,
+        session_storage: &dyn SessionStorage,
+        gas_meter: &mut impl GasMeter,
+        visited: &mut BTreeMap<(&'a AccountAddress, &'a IdentStr), ()>,
+        referenced_modules: &'a Arena<Arc<CompiledModule>>,
+        ids: I,
+    ) -> VMResult<()>
+    where
+        I: IntoIterator<Item = (&'a AccountAddress, &'a IdentStr)>,
+        I::IntoIter: DoubleEndedIterator,
+    {
+        // Initialize the work list (stack) and the map of visited modules.
+        //
+        // TODO: Determine the reserved capacity based on the max number of dependencies allowed.
+        let mut stack = Vec::with_capacity(512);
+
+        for (addr, name) in ids.into_iter().rev() {
+            // TODO: Allow the check of special addresses to be customized.
+            if !addr.is_special() && visited.insert((addr, name), ()).is_none() {
+                stack.push((addr, name, true));
+            }
+        }
+
+        while let Some((addr, name, allow_loading_failure)) = stack.pop() {
+            // Load and deserialize the module only if it has not been cached by the loader.
+            // Otherwise this will cause a significant regression in performance.
+            let module_id = ModuleId::new(*addr, name.to_owned());
+            let (size, _, module) =
+                self.load_compiled_module(&module_id, session_storage, allow_loading_failure)?;
+
+            // Extend the lifetime of the module to the remainder of the function body
+            // by storing it in an arena.
+            //
+            // This is needed because we need to store references derived from it in the
+            // work list.
+            let module = referenced_modules.alloc(module);
+
+            gas_meter
+                .charge_dependency(false, addr, name, NumBytes::new(size as u64))
+                .map_err(|err| {
+                    err.finish(Location::Module(ModuleId::new(*addr, name.to_owned())))
+                })?;
+
+            // Explore all dependencies and friends that have been visited yet.
+            for (addr, name) in module
+                .immediate_dependencies_iter()
+                .chain(module.immediate_friends_iter())
+                .rev()
+            {
+                // TODO: Allow the check of special addresses to be customized.
+                if !addr.is_special() && visited.insert((addr, name), ()).is_none() {
+                    stack.push((addr, name, false));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Similar to `check_dependencies_and_charge_gas`, except that this does not recurse
+    /// into transitive dependencies and allows non-existent modules.
+    pub(crate) fn check_dependencies_and_charge_gas_non_recursive_optional<'a, I>(
+        &self,
+        session_storage: &dyn SessionStorage,
+        gas_meter: &mut impl GasMeter,
+        visited: &mut BTreeMap<(&'a AccountAddress, &'a IdentStr), ()>,
+        ids: I,
+    ) -> VMResult<()>
+    where
+        I: IntoIterator<Item = (&'a AccountAddress, &'a IdentStr)>,
+    {
+        for (addr, name) in ids.into_iter() {
+            // TODO: Allow the check of special addresses to be customized.
+            if !addr.is_special() && visited.insert((addr, name), ()).is_some() {
+                continue;
+            }
+
+            // Load and deserialize the module only if it has not been cached by the loader.
+            // Otherwise this will cause a significant regression in performance.
+            let module_id = ModuleId::new(*addr, name.to_owned());
+            let size = match self.load_compiled_module(&module_id, session_storage, true) {
+                Ok((size, _, _)) => size,
+                Err(err) if err.major_status() == StatusCode::LINKER_ERROR => continue,
+                Err(err) => return Err(err),
+            };
+
+            gas_meter
+                .charge_dependency(false, addr, name, NumBytes::new(size as u64))
+                .map_err(|err| {
+                    err.finish(Location::Module(ModuleId::new(*addr, name.to_owned())))
+                })?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn check_script_dependencies_and_check_gas(
+        &self,
+        session_storage: &dyn SessionStorage,
+        gas_meter: &mut impl GasMeter,
+        traversal_context: &mut TraversalContext,
+        script_blob: &[u8],
+    ) -> VMResult<()> {
+        let script = session_storage
+            .deserialize_script(script_blob)
+            .map_err(|e| e.finish(Location::Script))?;
+        let script = traversal_context.referenced_scripts.alloc(script);
+
+        // TODO(Gas): Should we charge dependency gas for the script itself?
+        self.check_dependencies_and_charge_gas(
+            session_storage,
+            gas_meter,
+            &mut traversal_context.visited,
+            traversal_context.referenced_modules,
+            script.immediate_dependencies_iter(),
+        )?;
+
+        Ok(())
     }
 }
 
@@ -1221,9 +1350,9 @@ impl Loader {
         id: &StructIdentifier,
         ty_args: &[Type],
         gas_context: &mut PseudoGasContext,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<StructTag> {
-        let checksum = checksum_storage.load_checksum(&id.module_id)?;
+        let checksum = session_storage.load_checksum(&id.module_id)?;
         let locked_type_cache = self.type_cache.read();
         let types = locked_type_cache.get_types(&checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
@@ -1246,7 +1375,7 @@ impl Loader {
 
         let ty_arg_tags = ty_args
             .iter()
-            .map(|ty| self.type_to_type_tag_impl(ty, gas_context, checksum_storage))
+            .map(|ty| self.type_to_type_tag_impl(ty, gas_context, session_storage))
             .collect::<PartialVMResult<Vec<_>>>()?;
         let struct_tag = StructTag {
             address: *id.module_id.address(),
@@ -1271,7 +1400,7 @@ impl Loader {
         &self,
         ty: &Type,
         gas_context: &mut PseudoGasContext,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<TypeTag> {
         gas_context.charge(gas_context.cost_base)?;
         Ok(match ty {
@@ -1285,23 +1414,23 @@ impl Loader {
             Type::Address => TypeTag::Address,
             Type::Signer => TypeTag::Signer,
             Type::Vector(ty) => {
-                TypeTag::Vector(Box::new(self.type_to_type_tag(ty, checksum_storage)?))
-            }
+                TypeTag::Vector(Box::new(self.type_to_type_tag(ty, session_storage)?))
+            },
             Type::Struct { id, .. } => TypeTag::Struct(Box::new(self.struct_name_to_type_tag(
                 id,
                 &[],
                 gas_context,
-                checksum_storage,
+                session_storage,
             )?)),
             Type::StructInstantiation { id, ty_args, .. } => TypeTag::Struct(Box::new(
-                self.struct_name_to_type_tag(id, ty_args, gas_context, checksum_storage)?,
+                self.struct_name_to_type_tag(id, ty_args, gas_context, session_storage)?,
             )),
             Type::Reference(_) | Type::MutableReference(_) | Type::TyParam(_) => {
                 return Err(
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!("no type tag for {:?}", ty)),
                 );
-            }
+            },
         })
     }
 
@@ -1313,18 +1442,18 @@ impl Loader {
                 Type::Vector(ty) => {
                     result += 1;
                     todo.push(ty);
-                }
+                },
                 Type::Reference(ty) | Type::MutableReference(ty) => {
                     result += 1;
                     todo.push(ty);
-                }
+                },
                 Type::StructInstantiation { ty_args, .. } => {
                     result += 1;
                     todo.extend(ty_args.iter())
-                }
+                },
                 _ => {
                     result += 1;
-                }
+                },
             }
         }
         result
@@ -1336,9 +1465,9 @@ impl Loader {
         ty_args: &[Type],
         count: &mut u64,
         depth: u64,
-        checksum_storage: &dyn ChecksumStorage,
-    ) -> PartialVMResult<(MoveStructLayout, bool)> {
-        let checksum = checksum_storage.load_checksum(&id.module_id)?;
+        session_storage: &dyn SessionStorage,
+    ) -> PartialVMResult<(MoveTypeLayout, bool)> {
+        let checksum = session_storage.load_checksum(&id.module_id)?;
         let locked_type_cache = self.type_cache.read();
         let types = locked_type_cache.get_types(&checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
@@ -1361,7 +1490,7 @@ impl Loader {
         drop(locked_type_cache);
 
         let count_before = *count;
-        let struct_type = self.get_struct_type_by_identifier(id, checksum_storage)?;
+        let struct_type = self.get_struct_type_by_identifier(id, session_storage)?;
 
         // Some types can have fields which are lifted at serialization or deserialization
         // times. Right now these are Aggregator and AggregatorSnapshot.
@@ -1375,28 +1504,36 @@ impl Loader {
         let (mut field_layouts, field_has_identifier_mappings): (Vec<MoveTypeLayout>, Vec<bool>) =
             field_tys
                 .iter()
-                .map(|ty| self.type_to_type_layout_impl(ty, count, depth + 1, checksum_storage))
+                .map(|ty| self.type_to_type_layout_impl(ty, count, depth + 1, session_storage))
                 .collect::<PartialVMResult<Vec<_>>>()?
                 .into_iter()
                 .unzip();
-
-        // For aggregators / snapshots, the first field should be lifted.
-        if let Some(kind) = &maybe_mapping {
-            if let Some(l) = field_layouts.first_mut() {
-                *l = MoveTypeLayout::Tagged(
-                    LayoutTag::IdentifierMapping(kind.clone()),
-                    Box::new(l.clone()),
-                );
-            }
-        }
 
         let has_identifier_mappings =
             maybe_mapping.is_some() || field_has_identifier_mappings.into_iter().any(|b| b);
 
         let field_node_count = *count - count_before;
-        let struct_layout = MoveStructLayout::new(field_layouts);
+        let struct_layout = if Some(IdentifierMappingKind::DerivedString) == maybe_mapping {
+            // For DerivedString, the whole object should be lifted.
+            MoveTypeLayout::Native(
+                IdentifierMappingKind::DerivedString,
+                Box::new(MoveTypeLayout::Struct(MoveStructLayout::new(field_layouts))),
+            )
+        } else {
+            // For aggregators / snapshots, the first field should be lifted.
+            if let Some(kind) = &maybe_mapping {
+                if let Some(l) = field_layouts.first_mut() {
+                    *l = MoveTypeLayout::Native(kind.clone(), Box::new(l.clone()));
+                }
+            }
+            MoveTypeLayout::Struct(MoveStructLayout::new(field_layouts))
+        };
 
-        let mut locked_type_cache = self.type_cache.write();
+        let mut locked_type_cache: parking_lot::lock_api::RwLockWriteGuard<
+            '_,
+            parking_lot::RawRwLock,
+            TypeCache,
+        > = self.type_cache.write();
         let info = locked_type_cache.insert_type(&checksum, id, ty_args)?;
         info.struct_layout_info = Some(StructLayoutInfoCacheItem {
             struct_layout: struct_layout.clone(),
@@ -1422,6 +1559,8 @@ impl Loader {
                 Some(IdentifierMappingKind::Aggregator)
             } else if ident_str.eq(ident_str!("AggregatorSnapshot")) {
                 Some(IdentifierMappingKind::Snapshot)
+            } else if ident_str.eq(ident_str!("DerivedStringSnapshot")) {
+                Some(IdentifierMappingKind::DerivedString)
             } else {
                 None
             }
@@ -1438,7 +1577,7 @@ impl Loader {
         ty: &Type,
         count: &mut u64,
         depth: u64,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<(MoveTypeLayout, bool)> {
         if *count > MAX_TYPE_TO_LAYOUT_NODES {
             return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
@@ -1450,68 +1589,68 @@ impl Loader {
             Type::Bool => {
                 *count += 1;
                 (MoveTypeLayout::Bool, false)
-            }
+            },
             Type::U8 => {
                 *count += 1;
                 (MoveTypeLayout::U8, false)
-            }
+            },
             Type::U16 => {
                 *count += 1;
                 (MoveTypeLayout::U16, false)
-            }
+            },
             Type::U32 => {
                 *count += 1;
                 (MoveTypeLayout::U32, false)
-            }
+            },
             Type::U64 => {
                 *count += 1;
                 (MoveTypeLayout::U64, false)
-            }
+            },
             Type::U128 => {
                 *count += 1;
                 (MoveTypeLayout::U128, false)
-            }
+            },
             Type::U256 => {
                 *count += 1;
                 (MoveTypeLayout::U256, false)
-            }
+            },
             Type::Address => {
                 *count += 1;
                 (MoveTypeLayout::Address, false)
-            }
+            },
             Type::Signer => {
                 *count += 1;
                 (MoveTypeLayout::Signer, false)
-            }
+            },
             Type::Vector(ty) => {
                 *count += 1;
                 let (layout, has_identifier_mappings) =
-                    self.type_to_type_layout_impl(ty, count, depth + 1, checksum_storage)?;
+                    self.type_to_type_layout_impl(ty, count, depth + 1, session_storage)?;
                 (
                     MoveTypeLayout::Vector(Box::new(layout)),
                     has_identifier_mappings,
                 )
-            }
+            },
             Type::Struct { id, .. } => {
                 *count += 1;
                 // Note depth is increased inside struct_name_to_type_layout instead.
                 let (layout, has_identifier_mappings) =
-                    self.struct_name_to_type_layout(id, &[], count, depth, checksum_storage)?;
-                (MoveTypeLayout::Struct(layout), has_identifier_mappings)
-            }
+                    self.struct_name_to_type_layout(id, &[], count, depth, session_storage)?;
+                (layout, has_identifier_mappings)
+            },
             Type::StructInstantiation { id, ty_args, .. } => {
                 *count += 1;
                 // Note depth is incread inside struct_name_to_type_layout instead.
                 let (layout, has_identifier_mappings) =
-                    self.struct_name_to_type_layout(id, ty_args, count, depth, checksum_storage)?;
-                (MoveTypeLayout::Struct(layout), has_identifier_mappings)
-            }
+                    self.struct_name_to_type_layout(id, ty_args, count, depth, session_storage)?;
+                (layout, has_identifier_mappings)
+            },
             Type::Reference(_) | Type::MutableReference(_) | Type::TyParam(_) => {
                 return Err(
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!("no type layout for {:?}", ty)),
                 );
-            }
+            },
         })
     }
 
@@ -1521,9 +1660,9 @@ impl Loader {
         ty_args: &[Type],
         count: &mut u64,
         depth: u64,
-        checksum_storage: &dyn ChecksumStorage,
-    ) -> PartialVMResult<MoveStructLayout> {
-        let checksum = checksum_storage.load_checksum(&id.module_id)?;
+        session_storage: &dyn SessionStorage,
+    ) -> PartialVMResult<MoveTypeLayout> {
+        let checksum = session_storage.load_checksum(&id.module_id)?;
         let locked_type_cache = self.type_cache.read();
         let types = locked_type_cache.get_types(&checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
@@ -1544,7 +1683,7 @@ impl Loader {
         // explicitly drop
         drop(locked_type_cache);
 
-        let struct_type = self.get_struct_type_by_identifier(id, checksum_storage)?;
+        let struct_type = self.get_struct_type_by_identifier(id, session_storage)?;
         if struct_type.fields.len() != struct_type.field_names.len() {
             return Err(
                 PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR).with_message(
@@ -1563,7 +1702,7 @@ impl Loader {
         };
 
         let struct_tag =
-            self.struct_name_to_type_tag(id, ty_args, &mut gas_context, checksum_storage)?;
+            self.struct_name_to_type_tag(id, ty_args, &mut gas_context, session_storage)?;
         let field_layouts = struct_type
             .field_names
             .iter()
@@ -1574,12 +1713,13 @@ impl Loader {
                     &ty,
                     count,
                     depth + 1,
-                    checksum_storage,
+                    session_storage,
                 )?;
                 Ok(MoveFieldLayout::new(n.clone(), l))
             })
             .collect::<PartialVMResult<Vec<_>>>()?;
-        let struct_layout = MoveStructLayout::with_types(struct_tag, field_layouts);
+        let struct_layout =
+            MoveTypeLayout::Struct(MoveStructLayout::with_types(struct_tag, field_layouts));
         let field_node_count = *count - count_before;
 
         let mut locked_type_cache = self.type_cache.write();
@@ -1595,7 +1735,7 @@ impl Loader {
         ty: &Type,
         count: &mut u64,
         depth: u64,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<MoveTypeLayout> {
         if *count > MAX_TYPE_TO_LAYOUT_NODES {
             return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
@@ -1614,41 +1754,34 @@ impl Loader {
             Type::Address => MoveTypeLayout::Address,
             Type::Signer => MoveTypeLayout::Signer,
             Type::Vector(ty) => MoveTypeLayout::Vector(Box::new(
-                self.type_to_fully_annotated_layout_impl(ty, count, depth + 1, checksum_storage)?,
+                self.type_to_fully_annotated_layout_impl(ty, count, depth + 1, session_storage)?,
             )),
             Type::Struct { id, .. } => {
-                MoveTypeLayout::Struct(self.struct_name_to_fully_annotated_layout(
-                    id,
-                    &[],
-                    count,
-                    depth,
-                    checksum_storage,
-                )?)
-            }
-            Type::StructInstantiation { id, ty_args, .. } => {
-                MoveTypeLayout::Struct(self.struct_name_to_fully_annotated_layout(
+                self.struct_name_to_fully_annotated_layout(id, &[], count, depth, session_storage)?
+            },
+            Type::StructInstantiation { id, ty_args, .. } => self
+                .struct_name_to_fully_annotated_layout(
                     id,
                     ty_args,
                     count,
                     depth,
-                    checksum_storage,
-                )?)
-            }
+                    session_storage,
+                )?,
             Type::Reference(_) | Type::MutableReference(_) | Type::TyParam(_) => {
                 return Err(
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!("no type layout for {:?}", ty)),
                 );
-            }
+            },
         })
     }
 
     pub(crate) fn calculate_depth_of_struct(
         &self,
         id: &StructIdentifier,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<DepthFormula> {
-        let checksum = checksum_storage.load_checksum(&id.module_id)?;
+        let checksum = session_storage.load_checksum(&id.module_id)?;
         let locked_type_cache = self.type_cache.read();
         let types = locked_type_cache.get_types(&checksum).ok_or_else(|| {
             PartialVMError::new(StatusCode::LINKER_ERROR)
@@ -1661,12 +1794,12 @@ impl Loader {
         // explicitly drop
         drop(locked_type_cache);
 
-        let struct_type = self.get_struct_type_by_identifier(id, checksum_storage)?;
+        let struct_type = self.get_struct_type_by_identifier(id, session_storage)?;
 
         let formulas = struct_type
             .fields
             .iter()
-            .map(|field_type| self.calculate_depth_of_type(field_type, checksum_storage))
+            .map(|field_type| self.calculate_depth_of_type(field_type, session_storage))
             .collect::<PartialVMResult<Vec<_>>>()?;
         let formula = DepthFormula::normalize(formulas);
         let prev = self
@@ -1686,7 +1819,7 @@ impl Loader {
     fn calculate_depth_of_type(
         &self,
         ty: &Type,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<DepthFormula> {
         Ok(match ty {
             Type::Bool
@@ -1699,43 +1832,43 @@ impl Loader {
             | Type::U32
             | Type::U256 => DepthFormula::constant(1),
             Type::Vector(ty) => {
-                let mut inner = self.calculate_depth_of_type(ty, checksum_storage)?;
+                let mut inner = self.calculate_depth_of_type(ty, session_storage)?;
                 inner.scale(1);
                 inner
-            }
+            },
             Type::Reference(ty) | Type::MutableReference(ty) => {
-                let mut inner = self.calculate_depth_of_type(ty, checksum_storage)?;
+                let mut inner = self.calculate_depth_of_type(ty, session_storage)?;
                 inner.scale(1);
                 inner
-            }
+            },
             Type::TyParam(ty_idx) => DepthFormula::type_parameter(*ty_idx),
             Type::Struct { id, .. } => {
-                let mut struct_formula = self.calculate_depth_of_struct(id, checksum_storage)?;
+                let mut struct_formula = self.calculate_depth_of_struct(id, session_storage)?;
                 debug_assert!(struct_formula.terms.is_empty());
                 struct_formula.scale(1);
                 struct_formula
-            }
+            },
             Type::StructInstantiation { id, ty_args, .. } => {
                 let ty_arg_map = ty_args
                     .iter()
                     .enumerate()
                     .map(|(idx, ty)| {
                         let var = idx as TypeParameterIndex;
-                        Ok((var, self.calculate_depth_of_type(ty, checksum_storage)?))
+                        Ok((var, self.calculate_depth_of_type(ty, session_storage)?))
                     })
                     .collect::<PartialVMResult<BTreeMap<_, _>>>()?;
-                let struct_formula = self.calculate_depth_of_struct(id, checksum_storage)?;
+                let struct_formula = self.calculate_depth_of_struct(id, session_storage)?;
                 let mut subst_struct_formula = struct_formula.subst(ty_arg_map)?;
                 subst_struct_formula.scale(1);
                 subst_struct_formula
-            }
+            },
         })
     }
 
     pub(crate) fn type_to_type_tag(
         &self,
         ty: &Type,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<TypeTag> {
         let mut gas_context = PseudoGasContext {
             cost: 0,
@@ -1743,36 +1876,36 @@ impl Loader {
             cost_base: self.vm_config.type_base_cost,
             cost_per_byte: self.vm_config.type_byte_cost,
         };
-        self.type_to_type_tag_impl(ty, &mut gas_context, checksum_storage)
+        self.type_to_type_tag_impl(ty, &mut gas_context, session_storage)
     }
 
     pub(crate) fn type_to_type_layout_with_identifier_mappings(
         &self,
         ty: &Type,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<(MoveTypeLayout, bool)> {
         let mut count = 0;
-        self.type_to_type_layout_impl(ty, &mut count, 1, checksum_storage)
+        self.type_to_type_layout_impl(ty, &mut count, 1, session_storage)
     }
 
     pub(crate) fn type_to_type_layout(
         &self,
         ty: &Type,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<MoveTypeLayout> {
         let mut count = 0;
         let (layout, _has_identifier_mappings) =
-            self.type_to_type_layout_impl(ty, &mut count, 1, checksum_storage)?;
+            self.type_to_type_layout_impl(ty, &mut count, 1, session_storage)?;
         Ok(layout)
     }
 
     pub(crate) fn type_to_fully_annotated_layout(
         &self,
         ty: &Type,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<MoveTypeLayout> {
         let mut count = 0;
-        self.type_to_fully_annotated_layout_impl(ty, &mut count, 1, checksum_storage)
+        self.type_to_fully_annotated_layout_impl(ty, &mut count, 1, session_storage)
     }
 }
 
@@ -1781,22 +1914,20 @@ impl Loader {
     pub fn get_type_layout(
         &self,
         type_tag: &TypeTag,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<MoveTypeLayout> {
-        let ty = self.load_type(type_tag, module_storage, checksum_storage)?;
-        self.type_to_type_layout(&ty, checksum_storage)
+        let ty = self.load_type(type_tag, session_storage)?;
+        self.type_to_type_layout(&ty, session_storage)
             .map_err(|e| e.finish(Location::Undefined))
     }
 
     pub fn get_fully_annotated_type_layout(
         &self,
         type_tag: &TypeTag,
-        module_storage: &dyn ModuleStorage,
-        checksum_storage: &dyn ChecksumStorage,
+        session_storage: &dyn SessionStorage,
     ) -> VMResult<MoveTypeLayout> {
-        let ty = self.load_type(type_tag, module_storage, checksum_storage)?;
-        self.type_to_fully_annotated_layout(&ty, checksum_storage)
+        let ty = self.load_type(type_tag, session_storage)?;
+        self.type_to_fully_annotated_layout(&ty, session_storage)
             .map_err(|e| e.finish(Location::Undefined))
     }
 }

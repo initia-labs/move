@@ -11,9 +11,25 @@ This project is forked from [Aptos Move](https://github.com/aptos-labs/aptos-cor
 
 ```shell
 # make new subtree branch with latest changes
-git subtree split --prefix=third_party/move -b aptos-move-main
+git subtree split --prefix=third_party/move -b aptos-move
 
 # merge latest changes into our branch
-git switch aptos-move
-git merge aptos-move-main
+git switch initia-move
+git merge aptos-move
+```
+
+## How to validate changes
+
+```shell
+cargo test \
+ --package move-vm-integration-tests \
+ --package move-cli \
+ --package move-unit-test \
+ --package move-compiler \
+ --package move-analyzer \
+ --package move-stdlib \
+ --package move-package \
+ --package move-binary-format \
+ --package move-bytecode-verifier \
+ -- --skip prove
 ```

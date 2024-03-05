@@ -40,7 +40,7 @@ pub struct FunctionGenerator<'a> {
     code: Vec<FF::Bytecode>,
 }
 
-/// Immutable context for a function, seperated from the mutable generator state, to reduce
+/// Immutable context for a function, separated from the mutable generator state, to reduce
 /// borrow conflicts.
 #[derive(Clone)]
 pub struct FunctionContext<'env> {
@@ -92,7 +92,7 @@ impl<'a> FunctionGenerator<'a> {
         fun_env: FunctionEnv<'b>,
         acquires_list: &BTreeSet<StructId>,
     ) {
-        let loc = fun_env.get_loc();
+        let loc = fun_env.get_id_loc();
         let function = gen.function_index(ctx, &loc, &fun_env);
         let visibility = fun_env.visibility();
         let fun_count = gen.module.function_defs.len();
@@ -164,7 +164,7 @@ impl<'a> FunctionGenerator<'a> {
                 let bc = &bytecode[i];
                 let next_bc = &bytecode[i + 1];
                 self.gen_bytecode(&bytecode_ctx, &bytecode[i], Some(next_bc));
-                if !bc.is_branch() && matches!(next_bc, Bytecode::Label(..)) {
+                if !bc.is_branching() && matches!(next_bc, Bytecode::Label(..)) {
                     // At block boundaries without a preceding branch, need to flush stack
                     // TODO: to avoid this, we should use the CFG for code generation.
                     self.abstract_flush_stack_after(&bytecode_ctx, 0);
@@ -212,7 +212,7 @@ impl<'a> FunctionGenerator<'a> {
     fn pinned_temps(ctx: &FunctionContext) -> BTreeSet<TempIndex> {
         let mut result = BTreeSet::new();
         for bc in ctx.fun.get_bytecode() {
-            if let Bytecode::Call(_, _, Operation::BorrowLoc | Operation::Destroy, args, _) = bc {
+            if let Bytecode::Call(_, _, Operation::BorrowLoc | Operation::Drop, args, _) = bc {
                 result.insert(args[0]);
             }
         }
@@ -459,7 +459,11 @@ impl<'a> FunctionGenerator<'a> {
                 // order, perhaps we should fix this.
                 self.gen_builtin(ctx, dest, FF::Bytecode::WriteRef, &[source[1], source[0]])
             },
-            Operation::Destroy => {
+            Operation::Release => {
+                // Move bytecode does not process release, values are released indirectly
+                // when the borrowed head of the borrow chain is destroyed
+            },
+            Operation::Drop => {
                 // Currently Destroy is only translated for references. It may also make
                 // sense for other values, as we may figure later. Its known to be required
                 // for references to make the bytecode verifier happy.

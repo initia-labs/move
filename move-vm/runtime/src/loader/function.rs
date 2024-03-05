@@ -1,15 +1,22 @@
 use move_binary_format::{
     access::ModuleAccess,
+    binary_views::BinaryIndexedView,
     errors::{PartialVMError, PartialVMResult},
     file_format::{AbilitySet, Bytecode, CompiledModule, FunctionDefinitionIndex, Visibility},
 };
 use move_core_types::{identifier::Identifier, language_storage::ModuleId, vm_status::StatusCode};
-use move_vm_types::loaded_data::runtime_types::{Checksum, Type};
+use move_vm_types::loaded_data::{
+    runtime_access_specifier::AccessSpecifier,
+    runtime_types::{Checksum, StructIdentifier, Type},
+};
 use std::{fmt::Debug, sync::Arc};
 
 use crate::native_functions::{NativeFunction, NativeFunctions, UnboxedNativeFunction};
 
-use super::{module::Module, resolver::Resolver, ChecksumStorage, Loader};
+use super::{
+    access_specifier_loader::load_access_specifier, module::Module, resolver::Resolver,
+    SessionStorage, Loader,
+};
 
 // A simple wrapper for the "owner" of the function (Module or Script)
 #[derive(Clone, Debug)]
@@ -36,6 +43,7 @@ pub(crate) struct Function {
     pub(crate) return_types: Vec<Type>,
     pub(crate) local_types: Vec<Type>,
     pub(crate) parameter_types: Vec<Type>,
+    pub(crate) access_specifier: AccessSpecifier,
 }
 
 // This struct must be treated as an identifier for a function and not somehow relying on
@@ -60,6 +68,7 @@ impl Function {
         index: FunctionDefinitionIndex,
         module: &CompiledModule,
         signature_table: &[Vec<Type>],
+        struct_ids: &[StructIdentifier],
     ) -> PartialVMResult<Self> {
         let def = module.function_def_at(index);
         let handle = module.function_handle_at(def.function);
@@ -100,6 +109,13 @@ impl Function {
             vec![]
         };
 
+        let access_specifier = load_access_specifier(
+            BinaryIndexedView::Module(module),
+            signature_table,
+            struct_ids,
+            &handle.access_specifiers,
+        )?;
+
         let parameter_types = signature_table[handle.parameters.0 as usize].clone();
 
         Ok(Self {
@@ -115,6 +131,7 @@ impl Function {
             local_types,
             return_types,
             parameter_types,
+            access_specifier,
         })
     }
 
@@ -137,20 +154,20 @@ impl Function {
     pub(crate) fn get_resolver<'a>(
         &self,
         loader: &'a Loader,
-        checksum_storage: &dyn ChecksumStorage,
+        cache_storage: &dyn SessionStorage,
     ) -> Resolver<'a> {
         match &self.scope {
             Scope::Module(module_id) => {
                 let module = loader
-                    .get_module(module_id, checksum_storage)
+                    .get_module(module_id, cache_storage)
                     .expect("ModuleId on Function must exist")
                     .expect("ModuleId on Function must exist");
                 Resolver::for_module(loader, module)
-            }
+            },
             Scope::Script(script_hash) => {
                 let script = loader.get_script(script_hash);
                 Resolver::for_script(loader, script)
-            }
+            },
         }
     }
 

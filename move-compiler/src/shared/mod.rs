@@ -119,7 +119,7 @@ pub fn shortest_cycle<'a, T: Ord + Hash>(
                     } else {
                         (acc_len, acc_path)
                     })
-                }
+                },
             }
         });
     let (_, mut path) = shortest_path.unwrap();
@@ -696,17 +696,17 @@ pub mod known_attributes {
                 TestingAttribute::TEST_ONLY => Self::Testing(TestingAttribute::TestOnly),
                 TestingAttribute::EXPECTED_FAILURE => {
                     Self::Testing(TestingAttribute::ExpectedFailure)
-                }
+                },
                 VerificationAttribute::VERIFY_ONLY => {
                     Self::Verification(VerificationAttribute::VerifyOnly)
-                }
+                },
                 NativeAttribute::BYTECODE_INSTRUCTION => {
                     Self::Native(NativeAttribute::BytecodeInstruction)
-                }
+                },
                 NativeAttribute::NATIVE_INTERFACE => Self::Native(NativeAttribute::NativeInterface),
                 DeprecationAttribute::DEPRECATED_NAME => {
                     Self::Deprecation(DeprecationAttribute::Deprecated)
-                }
+                },
                 _ => return None,
             })
         }
@@ -818,33 +818,6 @@ pub mod known_attributes {
         }
     }
 
-    impl ViewAttribute {
-        const ALL_ATTRIBUTE_NAMES: [&'static str; 1] = [Self::VIEW_NAME];
-        pub const VIEW_NAME: &'static str = "view";
-    }
-
-    impl AttributeKind for ViewAttribute {
-        fn add_attribute_names(table: &mut BTreeSet<String>) {
-            for str in Self::ALL_ATTRIBUTE_NAMES {
-                table.insert(str.to_string());
-            }
-        }
-
-        fn name(&self) -> &str {
-            match self {
-                Self::View => Self::VIEW_NAME,
-            }
-        }
-
-        fn expected_positions(&self) -> &'static BTreeSet<AttributePosition> {
-            static VIEW_POSITIONS: Lazy<BTreeSet<AttributePosition>> =
-                Lazy::new(|| IntoIterator::into_iter([AttributePosition::Function]).collect());
-            match self {
-                Self::View => &VIEW_POSITIONS,
-            }
-        }
-    }
-
     impl VerificationAttribute {
         const ALL_ATTRIBUTE_NAMES: [&'static str; 1] = [Self::VERIFY_ONLY];
         pub const VERIFY_ONLY: &'static str = "verify_only";
@@ -944,6 +917,33 @@ pub mod known_attributes {
             });
             match self {
                 Self::Deprecated => &DEPRECATED_POSITIONS,
+            }
+        }
+    }
+
+    impl ViewAttribute {
+        const ALL_ATTRIBUTE_NAMES: [&'static str; 1] = [Self::VIEW_NAME];
+        pub const VIEW_NAME: &'static str = "view";
+    }
+
+    impl AttributeKind for ViewAttribute {
+        fn add_attribute_names(table: &mut BTreeSet<String>) {
+            for str in Self::ALL_ATTRIBUTE_NAMES {
+                table.insert(str.to_string());
+            }
+        }
+
+        fn name(&self) -> &str {
+            match self {
+                Self::View => Self::VIEW_NAME,
+            }
+        }
+
+        fn expected_positions(&self) -> &'static BTreeSet<AttributePosition> {
+            static VIEW_POSITIONS: Lazy<BTreeSet<AttributePosition>> =
+                Lazy::new(|| IntoIterator::into_iter([AttributePosition::Function]).collect());
+            match self {
+                Self::View => &VIEW_POSITIONS,
             }
         }
     }

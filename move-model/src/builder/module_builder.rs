@@ -32,9 +32,8 @@ use crate::{
         CONDITION_INJECTED_PROP, OPAQUE_PRAGMA, VERIFY_PRAGMA,
     },
     symbol::{Symbol, SymbolPool},
-    ty::{PrimitiveType, Type, BOOL_TYPE},
+    ty::{ErrorMessageContext, PrimitiveType, Type, BOOL_TYPE},
 };
-use codespan::Span;
 use codespan_reporting::diagnostic::Severity;
 use itertools::Itertools;
 use move_binary_format::{
@@ -340,8 +339,8 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                     .new_node(self.parent.to_loc(&v.loc), Type::Tuple(vec![]));
                 let v = match &v.value {
                     EA::AttributeValue_::Value(val) => {
-                        let val = if let Some((val, _)) =
-                            ExpTranslator::new(self).translate_value_free(val)
+                        let val = if let Some((val, _)) = ExpTranslator::new(self)
+                            .translate_value_free(val, &ErrorMessageContext::General)
                         {
                             val
                         } else {
@@ -508,9 +507,11 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
             EA::Visibility::Internal => Visibility::Private,
         };
         let is_native = matches!(def.body.value, EA::FunctionBody_::Native);
-        let loc = et.to_loc(&def.loc);
+        let def_loc = et.to_loc(&def.loc);
+        let name_loc = et.to_loc(&name.loc());
         et.parent.parent.define_fun(qsym.clone(), FunEntry {
-            loc: loc.clone(),
+            loc: def_loc.clone(),
+            name_loc,
             module_id: et.parent.module_id,
             fun_id,
             visibility,
@@ -528,7 +529,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
         let spec_fun_id = SpecFunId::new(self.spec_funs.len());
         self.parent
             .define_spec_or_builtin_fun(qsym, SpecOrBuiltinFunEntry {
-                loc: loc.clone(),
+                loc: def_loc.clone(),
                 oper: Operation::SpecFunction(self.module_id, spec_fun_id, None),
                 type_params: type_params.clone(),
                 type_param_constraints: BTreeMap::default(),
@@ -540,7 +541,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
         // Add $ to the name so the spec version does not name clash with the Move version.
         let spec_fun_name = self.symbol_pool().make(&format!("${}", name.0.value));
         let mut fun_decl = SpecFunDecl {
-            loc,
+            loc: def_loc,
             name: spec_fun_name,
             type_params,
             params,
@@ -651,10 +652,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
         let loc1 = self.parent.env.to_loc(&n1.loc);
         if let Some(n2) = n2_opt {
             let loc2 = self.parent.env.to_loc(&n2.loc);
-            Loc::new(
-                loc1.file_id(),
-                Span::new(loc1.span().start(), loc2.span().end()),
-            )
+            Loc::new(loc1.file_id(), loc1.span().merge(loc2.span()))
         } else {
             loc1
         }
@@ -1367,7 +1365,8 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                 } else {
                     None
                 };
-                let mut result = et.translate_seq(&loc, seq, &result_type);
+                let mut result =
+                    et.translate_seq(&loc, seq, &result_type, &ErrorMessageContext::Return);
                 et.finalize_types();
                 result = et.post_process_body(result.into_exp()).into();
                 (result, access_specifiers)
@@ -1720,7 +1719,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
             None => PropertyValue::Value(Value::Bool(true)),
             Some(EA::PragmaValue::Literal(ev)) => {
                 let mut et = ExpTranslator::new(self);
-                match et.translate_value_free(ev) {
+                match et.translate_value_free(ev, &ErrorMessageContext::General) {
                     None => {
                         // Error reported
                         return;
@@ -2475,7 +2474,8 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                 for Parameter(n, ty, loc) in params {
                     et.define_local(&loc, n, ty, None, None);
                 }
-                let translated = et.translate_seq(&loc, seq, &result_type);
+                let translated =
+                    et.translate_seq(&loc, seq, &result_type, &ErrorMessageContext::Return);
                 et.finalize_types();
                 self.spec_funs[self.spec_fun_index].body = Some(translated.into_exp());
             },
@@ -3005,10 +3005,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                     loc,
                     &ty,
                     &entry.type_,
-                    &format!(
-                        "for `{}` included from schema",
-                        name.display(et.symbol_pool())
-                    ),
+                    &ErrorMessageContext::SchemaInclusion(*name),
                 );
                 // Put into argument map.
                 let node_id = et.new_node_id_with_type_loc(&entry.type_, loc);
@@ -3753,6 +3750,13 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
             if entry.module_id != self.module_id {
                 continue;
             }
+            // If the function is from a script, its return value must be unit.
+            if self.module_name.is_script() && !entry.result_type.is_unit() {
+                self.parent.error(
+                    &entry.name_loc,
+                    "The function entry point to a `script` must have the return type `()`",
+                );
+            }
             // New function
             let spec = self.fun_specs.remove(&name.symbol).unwrap_or_default();
             let def = self.fun_defs.remove(&name.symbol);
@@ -3760,6 +3764,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
             let data = FunctionData {
                 name: name.symbol,
                 loc: entry.loc.clone(),
+                id_loc: entry.name_loc.clone(),
                 def_idx: None,
                 handle_idx: None,
                 visibility: entry.visibility,
@@ -3771,7 +3776,7 @@ impl<'env, 'translator> ModuleBuilder<'env, 'translator> {
                 result_type: entry.result_type.clone(),
                 access_specifiers,
                 spec: spec.into(),
-                def: def.into(),
+                def,
                 called_funs: None,
                 calling_funs: RefCell::default(),
                 transitive_closure_of_called_funs: RefCell::default(),

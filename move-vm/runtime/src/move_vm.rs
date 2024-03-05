@@ -3,9 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    config::VMConfig, data_cache::TransactionDataCache, native_extensions::NativeContextExtensions,
-    native_functions::NativeFunction, runtime::VMRuntime, session::Session,
-    session_cache::SessionCache,
+    config::VMConfig, native_extensions::NativeContextExtensions, native_functions::NativeFunction,
+    runtime::VMRuntime, session::Session, session_cache::SessionCache,
 };
 use move_binary_format::errors::{Location, PartialVMError, VMResult};
 use move_core_types::{
@@ -52,7 +51,7 @@ impl MoveVM {
         &self,
         remote: &'r impl MoveResolver<PartialVMError>,
     ) -> Session<'r, '_> {
-        self.new_session_with_extensions(remote, NativeContextExtensions::default())
+        self.runtime.new_session(remote)
     }
 
     /// Create a new session, as in `new_session`, but provide native context extensions.
@@ -61,12 +60,8 @@ impl MoveVM {
         remote: &'r impl MoveResolver<PartialVMError>,
         native_extensions: NativeContextExtensions<'r>,
     ) -> Session<'r, '_> {
-        Session {
-            runtime: &self.runtime,
-            data_cache: TransactionDataCache::new(remote),
-            session_cache: SessionCache::new(remote),
-            native_extensions,
-        }
+        self.runtime
+            .new_session_with_extensions(remote, native_extensions)
     }
 
     pub fn get_fully_annotated_type_layout(
@@ -76,7 +71,7 @@ impl MoveVM {
     ) -> VMResult<MoveTypeLayout> {
         self.runtime
             .loader
-            .get_fully_annotated_type_layout(type_tag, session_cache, session_cache)
+            .get_fully_annotated_type_layout(type_tag, session_cache)
     }
 
     pub fn flush_unused_module_cache(&self) {

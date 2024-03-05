@@ -130,6 +130,7 @@ impl TestRunner {
         // TODO: maybe we should require the clients to always pass in a list of native functions so
         // we don't have to make assumptions about their gas parameters.
         native_function_table: Option<NativeFunctionTable>,
+        genesis_state: Option<ChangeSet>,
         cost_table: Option<CostTable>,
         record_writeset: bool,
         #[cfg(feature = "evm-backend")] evm: bool,
@@ -140,7 +141,10 @@ impl TestRunner {
             .map(|(filepath, _)| filepath.to_string())
             .collect();
         let modules = tests.module_info.values().map(|info| &info.module);
-        let starting_storage_state = setup_test_storage(modules)?;
+        let mut starting_storage_state = setup_test_storage(modules)?;
+        if let Some(genesis_state) = genesis_state {
+            starting_storage_state.apply(genesis_state)?;
+        }
         let native_function_table = native_function_table.unwrap_or_else(|| {
             move_stdlib::natives::all_natives(
                 AccountAddress::from_hex_literal("0x1").unwrap(),
@@ -345,13 +349,13 @@ impl SharedTestingConfig {
                         Some(ExpectedFailure::Expected) => {
                             output.pass(function_name);
                             stats.test_success(test_run_info, test_plan);
-                        }
+                        },
                         Some(ExpectedFailure::ExpectedWithError(expected_err))
                             if expected_err == &actual_err =>
                         {
                             output.pass(function_name);
                             stats.test_success(test_run_info, test_plan);
-                        }
+                        },
                         Some(ExpectedFailure::ExpectedWithCodeDEPRECATED(code))
                             if actual_err.0 == StatusCode::ABORTED
                                 && actual_err.1.is_some()
@@ -359,7 +363,7 @@ impl SharedTestingConfig {
                         {
                             output.pass(function_name);
                             stats.test_success(test_run_info, test_plan);
-                        }
+                        },
                         // incorrect cases
                         Some(ExpectedFailure::ExpectedWithError(expected_err)) => {
                             output.fail(function_name);
@@ -372,7 +376,7 @@ impl SharedTestingConfig {
                                 ),
                                 test_plan,
                             )
-                        }
+                        },
                         Some(ExpectedFailure::ExpectedWithCodeDEPRECATED(expected_code)) => {
                             output.fail(function_name);
                             stats.test_failure(
@@ -387,7 +391,7 @@ impl SharedTestingConfig {
                                 ),
                                 test_plan,
                             )
-                        }
+                        },
                         None if err.major_status() == StatusCode::OUT_OF_GAS => {
                             // Ran out of ticks, report a test timeout and log a test failure
                             output.timeout(function_name);
@@ -400,7 +404,7 @@ impl SharedTestingConfig {
                                 ),
                                 test_plan,
                             )
-                        }
+                        },
                         None => {
                             output.fail(function_name);
                             stats.test_failure(
@@ -412,9 +416,9 @@ impl SharedTestingConfig {
                                 ),
                                 test_plan,
                             )
-                        }
+                        },
                     }
-                }
+                },
                 Ok(_) => {
                     // Expected the test to fail, but it executed
                     if test_info.expected_failure.is_some() {
@@ -433,7 +437,7 @@ impl SharedTestingConfig {
                         output.pass(function_name);
                         stats.test_success(test_run_info, test_plan);
                     }
-                }
+                },
             }
         }
 
@@ -528,7 +532,7 @@ impl SharedTestingConfig {
                         test_plan,
                     );
                     return stats;
-                }
+                },
             };
 
             let (res, duration) = self.execute_via_evm(&yul_code);
@@ -570,7 +574,7 @@ impl SharedTestingConfig {
                         ),
                         test_plan,
                     );
-                }
+                },
 
                 // Test expected to succeed, but aborted.
                 (None, ExitReason::Revert(_)) => {
@@ -588,7 +592,7 @@ impl SharedTestingConfig {
                         ),
                         test_plan,
                     )
-                }
+                },
 
                 // Expect the test to abort with a specific code.
                 (
@@ -621,7 +625,7 @@ impl SharedTestingConfig {
                             test_plan,
                         );
                     }
-                }
+                },
 
                 // Test expected to abort but succeeded.
                 (
@@ -637,18 +641,18 @@ impl SharedTestingConfig {
                         TestFailure::new(FailureReason::no_error(), test_run_info(), None, None),
                         test_plan,
                     )
-                }
+                },
 
                 // Test succeeded or failed as expected.
                 (None, ExitReason::Succeed(_))
                 | (Some(ExpectedFailure::Expected), ExitReason::Revert(_)) => {
                     output.pass(function_name);
                     stats.test_success(test_run_info(), test_plan);
-                }
+                },
 
                 (exp, reason) => {
                     unreachable!("Unexpected (exp, exit reason) pair: ({:?}, {:?}). This should not have happened.", exp, reason)
-                }
+                },
             }
         }
 

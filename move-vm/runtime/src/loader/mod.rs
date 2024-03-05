@@ -1,3 +1,4 @@
+mod access_specifier_loader;
 mod cache;
 mod function;
 mod loader_impl;
@@ -9,7 +10,7 @@ mod type_loader;
 
 pub(crate) use function::Function;
 pub(crate) use resolver::Resolver;
-pub(crate) use store::{ChecksumStorage, ChecksumStorageForVerify, ModuleStorage};
+pub(crate) use store::{SessionStorage, SessionStorageForVerify};
 
 pub use function::LoadedFunction;
 pub use loader_impl::Loader;

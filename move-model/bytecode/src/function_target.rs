@@ -7,7 +7,7 @@ use crate::{
     borrow_analysis,
     function_target_pipeline::FunctionVariant,
     livevar_analysis, reaching_def_analysis,
-    stackless_bytecode::{AttrId, Bytecode, Label},
+    stackless_bytecode::{AttrId, Bytecode, Label, Operation},
 };
 use itertools::Itertools;
 use move_binary_format::file_format::{CodeOffset, Visibility};
@@ -271,8 +271,16 @@ impl<'env> FunctionTarget<'env> {
         if let Some(sym) = self.data.local_names.get(&temp) {
             format!("local `{}`", sym.display(self.global_env().symbol_pool()))
         } else {
-            "local".to_owned()
+            "value".to_owned()
         }
+    }
+
+    /// Returns a name for a local if it is printable
+    pub fn get_local_name_opt(&self, temp: TempIndex) -> Option<String> {
+        self.data
+            .local_names
+            .get(&temp)
+            .map(|sym| sym.display(self.global_env().symbol_pool()).to_string())
     }
 
     /// Gets the type of the local at index. This must use an index in the range as determined by
@@ -373,12 +381,45 @@ impl<'env> FunctionTarget<'env> {
         res
     }
 
+    /// Get the set of locals that have been borrowed in the function.
+    pub fn get_borrowed_locals(&self) -> BTreeSet<TempIndex> {
+        self.get_bytecode()
+            .iter()
+            .filter_map(|bc| {
+                if let Bytecode::Call(_, _, Operation::BorrowLoc, srcs, _) = bc {
+                    // BorrowLoc should have only one source.
+                    srcs.first().cloned()
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Returns all the mentioned locals (in non-spec-only bytecode instructions).
+    pub fn get_mentioned_locals(&self) -> BTreeSet<TempIndex> {
+        let mut res = BTreeSet::new();
+        for bc in self.get_bytecode() {
+            if bc.is_spec_only() {
+                continue;
+            }
+            bc.sources()
+                .iter()
+                .chain(bc.dests().iter())
+                .for_each(|local| {
+                    res.insert(*local);
+                });
+        }
+        res
+    }
+
     /// Pretty print a bytecode instruction with offset, comments, annotations, and VC information.
     pub fn pretty_print_bytecode(
         &self,
         label_offsets: &BTreeMap<Label, CodeOffset>,
         offset: usize,
         code: &Bytecode,
+        verbose: bool,
     ) -> String {
         let mut texts = vec![];
 
@@ -389,7 +430,7 @@ impl<'env> FunctionTarget<'env> {
         }
 
         // add location
-        if cfg!(feature = "verbose-debug-print") {
+        if verbose {
             texts.push(format!(
                 "     # {}",
                 self.get_bytecode_loc(attr_id).display(self.global_env())
@@ -676,17 +717,25 @@ impl<'env> fmt::Display for FunctionTarget<'env> {
             writeln!(f, ";")?;
         } else {
             writeln!(f, " {{")?;
+            let verification = self.data.variant.is_verified();
+            let mentioned_locals = self.get_mentioned_locals();
             for i in self.get_parameter_count()..self.get_local_count() {
                 write!(f, "     var ")?;
                 write_decl(f, i)?;
+                if !verification && !mentioned_locals.contains(&i) {
+                    // We do not display unused annotation in verification mode.
+                    write!(f, " [unused]")?;
+                }
                 writeln!(f)?;
             }
             let label_offsets = Bytecode::label_offsets(self.get_bytecode());
             for (offset, code) in self.get_bytecode().iter().enumerate() {
+                // use `f.alternate()` to determine verbose print; its activated by `{:#}` instead of `{}`
+                // in the format string
                 writeln!(
                     f,
                     "{}",
-                    self.pretty_print_bytecode(&label_offsets, offset, code)
+                    self.pretty_print_bytecode(&label_offsets, offset, code, f.alternate())
                 )?;
             }
             writeln!(f, "}}")?;

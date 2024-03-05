@@ -17,7 +17,8 @@ use move_core_types::{
     vm_status::StatusCode,
 };
 use move_vm_types::{
-    loaded_data::runtime_types::{Checksum, Type},
+    loaded_data::runtime_types::Type,
+    value_serde::deserialize_and_allow_delayed_values,
     values::{GlobalValue, Value},
 };
 use std::collections::btree_map::BTreeMap;
@@ -26,7 +27,6 @@ pub struct AccountDataCache {
     // The bool flag in the `data_map` indicates whether the resource contains
     // an aggregator or snapshot.
     data_map: BTreeMap<Type, (MoveTypeLayout, GlobalValue, bool)>,
-    checksum_map: BTreeMap<Identifier, (Checksum, bool)>,
     module_map: BTreeMap<Identifier, (Bytes, bool)>,
 }
 
@@ -34,7 +34,6 @@ impl AccountDataCache {
     fn new() -> Self {
         Self {
             data_map: BTreeMap::new(),
-            checksum_map: BTreeMap::new(),
             module_map: BTreeMap::new(),
         }
     }
@@ -61,7 +60,7 @@ pub struct TransactionDataCache<'r> {
 impl<'r> TransactionDataCache<'r> {
     /// Create a `TransactionDataCache` with a `RemoteCache` that provides access to data
     /// not updated in the transaction.
-    pub fn new(remote: &'r impl MoveResolver<PartialVMError>) -> Self {
+    pub(crate) fn new(remote: &'r impl MoveResolver<PartialVMError>) -> Self {
         TransactionDataCache {
             remote,
             account_map: BTreeMap::new(),
@@ -97,8 +96,8 @@ impl<'r> TransactionDataCache<'r> {
         resource_converter: &dyn Fn(Value, MoveTypeLayout, bool) -> PartialVMResult<Resource>,
         loader: &Loader,
         checksum_store: &SessionCache,
-    ) -> PartialVMResult<Changes<Bytes, Checksum, Resource>> {
-        let mut change_set = Changes::<Bytes, Checksum, Resource>::new();
+    ) -> PartialVMResult<Changes<Bytes, Resource>> {
+        let mut change_set = Changes::<Bytes, Resource>::new();
 
         for (addr, account_data_cache) in self.account_map.into_iter() {
             let mut modules = BTreeMap::new();
@@ -127,21 +126,11 @@ impl<'r> TransactionDataCache<'r> {
                 }
             }
 
-            let mut checksums = BTreeMap::new();
-            for (module_name, (checksum, is_republishing)) in &account_data_cache.checksum_map {
-                let op = if *is_republishing {
-                    Op::Modify(*checksum)
-                } else {
-                    Op::New(*checksum)
-                };
-                checksums.insert(module_name.clone(), op);
-            }
-
-            if !modules.is_empty() || !resources.is_empty() || !checksums.is_empty() {
+            if !modules.is_empty() || !resources.is_empty() {
                 change_set
                     .add_account_changeset(
                         addr,
-                        AccountChanges::from_modules_resources(modules, checksums, resources),
+                        AccountChanges::from_modules_resources(modules, resources),
                     )
                     .expect("accounts should be unique");
             }
@@ -195,7 +184,7 @@ impl<'r> TransactionDataCache<'r> {
                 // non-struct top-level value; can't happen
                 {
                     return Err(PartialVMError::new(StatusCode::INTERNAL_TYPE_ERROR))
-                }
+                },
             };
             // TODO(Gas): Shall we charge for this?
             let (ty_layout, has_aggregator_lifting) =
@@ -224,7 +213,7 @@ impl<'r> TransactionDataCache<'r> {
 
             let gv = match data {
                 Some(blob) => {
-                    let val = match Value::simple_deserialize(&blob, &ty_layout) {
+                    let val = match deserialize_and_allow_delayed_values(&blob, &ty_layout) {
                         Some(val) => val,
                         None => {
                             let msg =
@@ -233,15 +222,14 @@ impl<'r> TransactionDataCache<'r> {
                                 StatusCode::FAILED_TO_DESERIALIZE_RESOURCE,
                             )
                             .with_message(msg));
-                        }
+                        },
                     };
 
                     GlobalValue::cached(val)?
-                }
+                },
                 None => GlobalValue::none(),
             };
 
-            
             self.account_map
                 .get_mut(&addr)
                 .unwrap()
@@ -265,7 +253,6 @@ impl<'r> TransactionDataCache<'r> {
         &mut self,
         module_id: &ModuleId,
         blob: Bytes,
-        checksum: Checksum,
         is_republishing: bool,
     ) -> VMResult<()> {
         let account_cache =
@@ -276,10 +263,6 @@ impl<'r> TransactionDataCache<'r> {
         account_cache
             .module_map
             .insert(module_id.name().to_owned(), (blob, is_republishing));
-
-        account_cache
-            .checksum_map
-            .insert(module_id.name().to_owned(), (checksum, is_republishing));
 
         Ok(())
     }
