@@ -4,6 +4,7 @@
 
 #![allow(clippy::new_without_default)]
 
+mod extensions;
 mod storage;
 
 pub mod gas_schedule;

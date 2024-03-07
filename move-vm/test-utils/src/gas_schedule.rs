@@ -8,7 +8,7 @@
 //! operations or other native operations; the cost of each native operation will be returned by the
 //! native function itself.
 use move_binary_format::{
-    errors::{PartialVMError, PartialVMResult},
+    errors::{Location, PartialVMError, PartialVMResult, VMResult},
     file_format::{
         Bytecode, CodeOffset, ConstantPoolIndex, FieldHandleIndex, FieldInstantiationIndex,
         FunctionHandleIndex, FunctionInstantiationIndex, SignatureIndex,
@@ -18,6 +18,7 @@ use move_binary_format::{
 };
 use move_core_types::{
     account_address::AccountAddress,
+    effects::{ChangeSet, Op},
     gas_algebra::{
         AbstractMemorySize, GasQuantity, InternalGas, InternalGasPerAbstractMemoryUnit,
         InternalGasUnit, NumArgs, NumBytes, NumTypeNodes, ToUnit,
@@ -27,6 +28,8 @@ use move_core_types::{
     u256,
     vm_status::StatusCode,
 };
+use move_resource_viewer::MoveValueAnnotator;
+use move_vm_runtime::native_extensions::NativeContextExtensions;
 use move_vm_types::{
     gas::{GasMeter, SimpleInstruction},
     views::{TypeView, ValueView},
@@ -37,6 +40,20 @@ use std::{
     ops::{Add, Mul},
     u64,
 };
+
+use crate::{extensions, InMemoryStorage};
+
+// gas meter for test-utils
+pub trait TestGasMeter: GasMeter {
+    fn instantiate(&self) -> Self;
+    fn remaining_gas(&self) -> Gas;
+    fn charge_write_set(
+        &mut self,
+        changes: ChangeSet,
+        extensions: NativeContextExtensions,
+        storage: &InMemoryStorage,
+    ) -> VMResult<String>;
+}
 
 pub enum GasUnit {}
 
@@ -112,6 +129,60 @@ pub struct GasStatus<'a> {
     charge: bool,
 }
 
+impl<'a> TestGasMeter for GasStatus<'a> {
+    fn instantiate(&self) -> Self {
+        Self {
+            gas_left: self.gas_left.clone(),
+            cost_table: self.cost_table,
+            charge: self.charge,
+        }
+    }
+
+    fn remaining_gas(&self) -> Gas {
+        self.remaining_gas()
+    }
+
+    fn charge_write_set(
+        &mut self,
+        changes: ChangeSet,
+        extensions: NativeContextExtensions,
+        storage: &InMemoryStorage,
+    ) -> VMResult<String> {
+        print_resources(changes, extensions, storage).map_err(|e| {
+            PartialVMError::new(StatusCode::FAILED_TO_SERIALIZE_WRITE_SET_CHANGES)
+                .with_message(e.to_string())
+                .finish(Location::Undefined)
+        })
+    }
+}
+
+fn print_resources(
+    cs: ChangeSet,
+    extensions: NativeContextExtensions,
+    storage: &InMemoryStorage,
+) -> anyhow::Result<String> {
+    use std::fmt::Write;
+    let mut buf = String::new();
+    let annotator = MoveValueAnnotator::new(storage);
+    for (account_addr, account_state) in cs.accounts() {
+        writeln!(&mut buf, "0x{}:", account_addr.short_str_lossless())?;
+
+        for (tag, resource_op) in account_state.resources() {
+            if let Op::New(resource) | Op::Modify(resource) = resource_op {
+                writeln!(
+                    &mut buf,
+                    "\t{}",
+                    format!("=> {}", annotator.view_resource(tag, resource)?).replace('\n', "\n\t")
+                )?;
+            }
+        }
+    }
+
+    extensions::print_change_sets(&mut buf, extensions);
+
+    Ok(buf)
+}
+
 impl<'a> GasStatus<'a> {
     /// Initialize the gas state with metering enabled.
     ///
@@ -157,11 +228,11 @@ impl<'a> GasStatus<'a> {
             Some(gas_left) => {
                 self.gas_left = gas_left;
                 Ok(())
-            },
+            }
             None => {
                 self.gas_left = InternalGas::new(0);
                 Err(PartialVMError::new(StatusCode::OUT_OF_GAS))
-            },
+            }
         }
     }
 
@@ -459,13 +530,11 @@ impl<'b> GasMeter for GasStatus<'b> {
     ) -> PartialVMResult<()> {
         use Opcodes::*;
 
-        self.charge_instr(
-            if is_mut {
-                VEC_MUT_BORROW
-            } else {
-                VEC_IMM_BORROW
-            },
-        )
+        self.charge_instr(if is_mut {
+            VEC_MUT_BORROW
+        } else {
+            VEC_IMM_BORROW
+        })
     }
 
     fn charge_vec_push_back(

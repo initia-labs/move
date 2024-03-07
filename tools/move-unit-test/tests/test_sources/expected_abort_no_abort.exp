@@ -2,9 +2,9 @@ Running Move unit tests
 [ FAIL    ] 0x1::M::fail
 [ FAIL    ] 0x1::M::fail_with_code
 0x1::M::fail
-Output: Ok(Changes { accounts: {} })
+Output: Ok("")
 0x1::M::fail_with_code
-Output: Ok(Changes { accounts: {} })
+Output: Ok("")
 
 Test failures:
 
