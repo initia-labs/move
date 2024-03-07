@@ -38,6 +38,12 @@ use std::{
     u64,
 };
 
+// gas meter for test-utils
+pub trait TestGasMeter: GasMeter {
+    fn instantiate(&self) -> Self;
+    fn remaining_gas(&self) -> Gas;
+}
+
 pub enum GasUnit {}
 
 pub type Gas = GasQuantity<GasUnit>;
@@ -112,6 +118,20 @@ pub struct GasStatus<'a> {
     charge: bool,
 }
 
+impl<'a> TestGasMeter for GasStatus<'a> {
+    fn instantiate(&self) -> Self {
+        Self {
+            gas_left: self.gas_left.clone(),
+            cost_table: self.cost_table,
+            charge: self.charge,
+        }
+    }
+
+    fn remaining_gas(&self) -> Gas {
+        self.remaining_gas()
+    }
+}
+
 impl<'a> GasStatus<'a> {
     /// Initialize the gas state with metering enabled.
     ///
@@ -157,11 +177,11 @@ impl<'a> GasStatus<'a> {
             Some(gas_left) => {
                 self.gas_left = gas_left;
                 Ok(())
-            },
+            }
             None => {
                 self.gas_left = InternalGas::new(0);
                 Err(PartialVMError::new(StatusCode::OUT_OF_GAS))
-            },
+            }
         }
     }
 
@@ -459,13 +479,11 @@ impl<'b> GasMeter for GasStatus<'b> {
     ) -> PartialVMResult<()> {
         use Opcodes::*;
 
-        self.charge_instr(
-            if is_mut {
-                VEC_MUT_BORROW
-            } else {
-                VEC_IMM_BORROW
-            },
-        )
+        self.charge_instr(if is_mut {
+            VEC_MUT_BORROW
+        } else {
+            VEC_IMM_BORROW
+        })
     }
 
     fn charge_vec_push_back(
