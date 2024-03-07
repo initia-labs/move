@@ -219,6 +219,8 @@ impl UnitTestingConfig {
         Some(test_plan)
     }
 
+    /// Public entry point to Move unit testing as a library
+    /// Returns `true` if all unit tests passed. Otherwise, returns `false`.
     pub fn run_and_report_unit_tests<W: Write + Send>(
         &self,
         test_plan: TestPlan,
