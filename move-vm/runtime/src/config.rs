@@ -29,6 +29,7 @@ pub struct VMConfig {
     pub aggregator_v2_type_tagging: bool,
     pub module_cache_capacity: usize,
     pub script_cache_capacity: usize,
+    pub allow_arbitrary: bool,
 }
 
 impl Default for VMConfig {
@@ -46,6 +47,7 @@ impl Default for VMConfig {
             aggregator_v2_type_tagging: false,
             module_cache_capacity: 1000,
             script_cache_capacity: 100,
+            allow_arbitrary: false,
         }
     }
 }

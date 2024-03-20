@@ -65,11 +65,12 @@ impl<'a> Resolver<'a> {
         idx: FunctionHandleIndex,
         session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Arc<Function>> {
-        let idx = match &self.binary {
-            BinaryType::Module(module) => module.function_at(idx.0),
-            BinaryType::Script(script) => script.function_at(idx.0),
+        let (self_id, idx) = match &self.binary {
+            BinaryType::Module(module) => (Some(&module.id), module.function_at(idx.0)),
+            BinaryType::Script(script) => (None, script.function_at(idx.0)),
         };
-        self.loader.function_at(idx, session_storage)
+
+        self.loader.function_at(self_id, idx, session_storage)
     }
 
     pub(crate) fn function_from_instantiation(
@@ -77,11 +78,15 @@ impl<'a> Resolver<'a> {
         idx: FunctionInstantiationIndex,
         session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Arc<Function>> {
-        let func_inst = match &self.binary {
-            BinaryType::Module(module) => module.function_instantiation_at(idx.0),
-            BinaryType::Script(script) => script.function_instantiation_at(idx.0),
+        let (self_id, func_inst) = match &self.binary {
+            BinaryType::Module(module) => {
+                (Some(&module.id), module.function_instantiation_at(idx.0))
+            }
+            BinaryType::Script(script) => (None, script.function_instantiation_at(idx.0)),
         };
-        self.loader.function_at(&func_inst.handle, session_storage)
+
+        self.loader
+            .function_at(self_id, &func_inst.handle, session_storage)
     }
 
     pub(crate) fn instantiate_generic_function(

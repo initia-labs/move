@@ -100,14 +100,13 @@ impl<'r> SessionCache<'r> {
     pub(crate) fn record_publish(
         &mut self,
         module_id: &ModuleId,
-        module_blob: Bytes,
         checksum: Checksum,
+        module_size: usize,
+        arc_module: Arc<CompiledModule>,
     ) -> PartialVMResult<()> {
-        let module = self.deserialize_module(&module_blob)?;
-        let arc_module = Arc::new(module);
         self.modules
             .write()
-            .insert(module_id.clone(), (module_blob.len(), checksum, arc_module));
+            .insert(module_id.clone(), (module_size, checksum, arc_module));
         self.checksums.write().insert(module_id.clone(), checksum);
 
         Ok(())

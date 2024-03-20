@@ -189,7 +189,9 @@ impl<'r> TransactionDataCache<'r> {
             let (ty_layout, has_aggregator_lifting) =
                 loader.type_to_type_layout_with_identifier_mappings(ty, checksum_store)?;
 
-            let module = loader.load_module(&ty_tag.module_id(), checksum_store).map_err(|e| e.to_partial())?;
+            let module = loader
+                .load_module(&ty_tag.module_id(), checksum_store)
+                .map_err(|e| e.to_partial())?;
             let metadata = &module.compiled_module().metadata;
 
             // If we need to process aggregator lifting, we pass type layout to remote.

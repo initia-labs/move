@@ -9,7 +9,8 @@ use move_binary_format::{
     access::{ModuleAccess, ScriptAccess},
     errors::{verification_error, Location, PartialVMError, PartialVMResult, VMResult},
     file_format::{
-        AbilitySet, CompiledScript, StructFieldInformation, TableIndex, TypeParameterIndex,
+        AbilitySet, CompiledScript, FunctionDefinitionIndex, StructFieldInformation, TableIndex,
+        TypeParameterIndex, Visibility,
     },
     CompiledModule, IndexKind,
 };
@@ -702,6 +703,34 @@ impl Loader {
         self.load_module_internal(id, &BTreeMap::new(), &BTreeSet::new(), session_storage)
     }
 
+    // The interface for module recording. This should be called after verification.
+    pub(crate) fn record_module_cache(
+        &self,
+        size: usize,
+        compiled_module: Arc<CompiledModule>,
+        session_storage: &dyn SessionStorage,
+    ) -> VMResult<Arc<Module>> {
+        let mut locked_module_cache = self.module_cache.write();
+        let module = Module::new(
+            &self.natives,
+            size,
+            compiled_module,
+            &locked_module_cache,
+            session_storage,
+        )
+        .map_err(|e| e.finish(Location::Undefined))?;
+
+        let checksum = module.checksum;
+        let module_ref = locked_module_cache.insert(checksum, module);
+
+        // create type cache for module
+        self.type_cache.write().create_type_cache(checksum);
+
+        drop(locked_module_cache); // explicit unlock
+
+        Ok(module_ref)
+    }
+
     // The interface to cleanup the unused modules from the cache.
     pub fn flush_unused_module_cache(&self) {
         // flush operation holds all loader locks, so good to avoid frequent flushing.
@@ -846,15 +875,15 @@ impl Loader {
         }
 
         // module self-check
-        let (size, module) =
+        let (size, arc_module) =
             self.load_and_verify_module(id, session_storage, allow_module_loading_failure)?;
         visited.insert(id.clone());
-        friends_discovered.extend(module.immediate_friends());
+        friends_discovered.extend(arc_module.immediate_friends());
 
         // downward exploration of the module's dependency graph. For a module that is loaded from
         // the session_storage, we should never allow its dependencies to fail to load.
         self.load_and_verify_dependencies(
-            &module,
+            &arc_module,
             bundle_verified,
             session_storage,
             visited,
@@ -864,25 +893,7 @@ impl Loader {
         )?;
 
         // if linking goes well, insert the module to the code cache
-        let mut locked_module_cache = self.module_cache.write();
-        let module = Module::new(
-            &self.natives,
-            size,
-            module,
-            &locked_module_cache,
-            session_storage,
-        )
-        .map_err(|e| e.finish(Location::Undefined))?;
-
-        let checksum = module.checksum;
-        let module_ref = locked_module_cache.insert(checksum, module);
-
-        // create type cache for module
-        self.type_cache.write().create_type_cache(checksum);
-
-        drop(locked_module_cache); // explicit unlock
-
-        Ok(module_ref)
+        self.record_module_cache(size, arc_module, session_storage)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1142,6 +1153,7 @@ impl Loader {
 
     pub(crate) fn function_at(
         &self,
+        self_id: Option<&ModuleId>,
         handle: &FunctionHandle,
         session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Arc<Function>> {
@@ -1151,15 +1163,46 @@ impl Loader {
                 let module = self
                     .load_module(module_id, session_storage)
                     .map_err(|e| e.to_partial())?;
-                module
+                let func = module
                     .function_map
                     .get(name)
-                    .and_then(|idx| module.function_defs.get(*idx).cloned())
+                    .and_then(|idx| {
+                        let func = module.function_defs.get(*idx).cloned()?;
+
+                        // if arbitrary update is enabled, we should check
+                        // the dependency visibility again.
+                        if self.vm_config.allow_arbitrary {
+                            let compiled_module = module.compiled_module();
+                            let def_idx = FunctionDefinitionIndex(*idx as TableIndex);
+                            let func_def = compiled_module.function_def_at(def_idx);
+                            let allowed = match func_def.visibility {
+                                Visibility::Public => true,
+                                Visibility::Friend => {
+                                    let friend_module_ids: BTreeSet<_> =
+                                        compiled_module.immediate_friends().into_iter().collect();
+                                    self_id.map_or(false, |self_id| {
+                                        friend_module_ids.contains(self_id)
+                                    })
+                                }
+                                Visibility::Private => false,
+                            };
+
+                            if allowed {
+                                Some(func)
+                            } else {
+                                None
+                            }
+                        } else {
+                            Some(func)
+                        }
+                    })
                     .ok_or_else(|| {
                         PartialVMError::new(StatusCode::TYPE_RESOLUTION_FAILURE).with_message(
                             format!("Failed to resolve function: {:?}::{:?}", module_id, name),
                         )
-                    })
+                    })?;
+
+                Ok(func)
             }
         }
     }

@@ -238,11 +238,21 @@ impl VMRuntime {
                 .exists_module(&module_id)
                 .map_err(|e| e.finish(Location::Module(module_id.clone())))?;
 
+            let arc_module = Arc::new(module);
             let module_bytes: Bytes = blob.into();
+            let module_size = module_bytes.len();
+
+            // record session cache
             session_cache
-                .record_publish(&module_id, module_bytes.clone(), checksum)
+                .record_publish(&module_id, checksum, module_size, arc_module.clone())
                 .map_err(|e| e.finish(Location::Module(module_id.clone())))?;
+
+            // record transaction cache
             data_store.publish_module(&module_id, module_bytes, is_republishing)?;
+
+            // record module to loader cache
+            self.loader
+                .record_module_cache(module_size, arc_module, session_cache)?;
         }
         Ok(())
     }
@@ -639,8 +649,7 @@ impl VMRuntime {
     where
         F: FnOnce(&[Metadata]) -> Option<T>,
     {
-        self
-            .loader
+        self.loader
             .load_module(module_id, session_cache)
             .map_err(|e| e.to_partial())
             .map(|v| f(&v.compiled_module().metadata))

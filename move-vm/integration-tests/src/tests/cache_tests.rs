@@ -217,6 +217,7 @@ fn test_small_cache_update_module() {
 fn test_update_function(update_path: &str, cache_size: usize) -> VMResult<SerializedReturnValues> {
     let config = VMConfig {
         module_cache_capacity: cache_size,
+        allow_arbitrary: true,
         ..Default::default()
     };
 
@@ -306,7 +307,7 @@ fn test_deleted_function_update_module() {
     )
     .unwrap_err();
 
-    assert_eq!(err.major_status(), StatusCode::UNEXPECTED_VERIFIER_ERROR);
+    assert_eq!(err.major_status(), StatusCode::TYPE_RESOLUTION_FAILURE);
 }
 
 #[test]
@@ -317,7 +318,7 @@ fn test_private_function_update_module() {
     )
     .unwrap_err();
 
-    assert_eq!(err.major_status(), StatusCode::UNEXPECTED_VERIFIER_ERROR);
+    assert_eq!(err.major_status(), StatusCode::TYPE_RESOLUTION_FAILURE);
 }
 
 fn test_new_loader_after_update_function(
