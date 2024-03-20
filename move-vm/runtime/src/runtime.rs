@@ -641,7 +641,8 @@ impl VMRuntime {
     {
         Ok(self
             .loader
-            .get_module(module_id, session_cache)?
-            .and_then(|v| f(&v.compiled_module().metadata)))
+            .load_module(module_id, session_cache)
+            .map_err(|e| e.to_partial())
+            .map(|v| f(&v.compiled_module().metadata))?)
     }
 }

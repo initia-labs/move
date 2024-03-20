@@ -1148,11 +1148,13 @@ impl Loader {
         match handle {
             FunctionHandle::Local(func) => Ok(func.clone()),
             FunctionHandle::Remote { module_id, name } => {
-                self.get_module(module_id, session_storage)?
-                    .and_then(|module| {
-                        let idx = module.function_map.get(name)?;
-                        module.function_defs.get(*idx).cloned()
-                    })
+                let module = self
+                    .load_module(module_id, session_storage)
+                    .map_err(|e| e.to_partial())?;
+                module
+                    .function_map
+                    .get(name)
+                    .and_then(|idx| module.function_defs.get(*idx).cloned())
                     .ok_or_else(|| {
                         PartialVMError::new(StatusCode::TYPE_RESOLUTION_FAILURE).with_message(
                             format!("Failed to resolve function: {:?}::{:?}", module_id, name),
@@ -1160,15 +1162,6 @@ impl Loader {
                     })
             }
         }
-    }
-
-    pub(crate) fn get_module(
-        &self,
-        id: &ModuleId,
-        session_storage: &dyn SessionStorage,
-    ) -> PartialVMResult<Option<Arc<Module>>> {
-        let checksum = session_storage.load_checksum(id)?;
-        Ok(self.module_cache.read().get(&checksum))
     }
 
     pub(crate) fn get_script(&self, checksum: &Checksum) -> Arc<Script> {
@@ -1183,11 +1176,9 @@ impl Loader {
         id: &StructIdentifier,
         session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Arc<StructType>> {
-        let checksum = session_storage.load_checksum(&id.module_id)?;
-        let module = self.module_cache.read().get(&checksum).ok_or_else(|| {
-            PartialVMError::new(StatusCode::LINKER_ERROR)
-                .with_message(format!("Cannot find {:?} in cache", checksum))
-        })?;
+        let module = self
+            .load_module(&id.module_id, session_storage)
+            .map_err(|e| e.to_partial())?;
 
         module.get_struct_type_by_identifier(&id.name)
     }

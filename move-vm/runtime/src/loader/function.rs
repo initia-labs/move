@@ -159,8 +159,7 @@ impl Function {
         match &self.scope {
             Scope::Module(module_id) => {
                 let module = loader
-                    .get_module(module_id, cache_storage)
-                    .expect("ModuleId on Function must exist")
+                    .load_module(module_id, cache_storage)
                     .expect("ModuleId on Function must exist");
                 Resolver::for_module(loader, module)
             }
