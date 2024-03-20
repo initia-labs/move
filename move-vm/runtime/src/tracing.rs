@@ -48,7 +48,6 @@ static DEBUGGING_ENABLED: Lazy<bool> =
 #[cfg(any(debug_assertions, feature = "debugging"))]
 pub static LOGGING_FILE_WRITER: Lazy<Mutex<std::io::BufWriter<File>>> = Lazy::new(|| {
     let file = OpenOptions::new()
-        
         .create(true)
         .append(true)
         .open(&*FILE_PATH)
