@@ -639,10 +639,10 @@ impl VMRuntime {
     where
         F: FnOnce(&[Metadata]) -> Option<T>,
     {
-        Ok(self
+        self
             .loader
             .load_module(module_id, session_cache)
             .map_err(|e| e.to_partial())
-            .map(|v| f(&v.compiled_module().metadata))?)
+            .map(|v| f(&v.compiled_module().metadata))
     }
 }
