@@ -23,19 +23,21 @@ pub struct SessionCache<'r> {
     // we don't need lock because it is created per session,
     // but use lock to avoid make load_checksum as mutable.
     checksums: RwLock<BTreeMap<ModuleId, Checksum>>,
-
-    // we don't need lock because it is created per session,
-    // but use lock to avoid make load_checksum as mutable.
     modules: RwLock<BTreeMap<ModuleId, (usize, Checksum, Arc<CompiledModule>)>>,
-
-    // we don't need lock because it is created per session,
-    // but use lock to avoid make load_checksum as mutable.
     scripts: RwLock<BTreeMap<Checksum, Arc<CompiledScript>>>,
+    check_compat: RwLock<Option<bool>>,
 }
 
 impl<'r> SessionStorage for SessionCache<'r> {
     fn check_compat(&self) -> PartialVMResult<bool> {
-        self.remote.get_check_compat()
+        if let Some(check_compat) = *self.check_compat.read() {
+            return Ok(check_compat)
+        }
+
+        let check_compat = self.remote.get_check_compat()?;
+        *self.check_compat.write() = Some(check_compat);
+
+        Ok(check_compat)
     }
 
     fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<Checksum> {
@@ -98,6 +100,7 @@ impl<'r> SessionCache<'r> {
             checksums: RwLock::new(BTreeMap::new()),
             modules: RwLock::new(BTreeMap::new()),
             scripts: RwLock::new(BTreeMap::new()),
+            check_compat: RwLock::new(None),
         }
     }
 

@@ -99,8 +99,6 @@ impl VMRuntime {
             .map_err(|e| e.finish(Location::Undefined))?
             && !compat.need_check_compat()
         {
-            println!("SIBONG {:?}", session_cache
-            .check_compat());
             return Err(PartialVMError::new(StatusCode::ABORTED)
                 .with_message("vm is not configured to allow arbitrary update".to_string())
                 .finish(Location::Undefined));
