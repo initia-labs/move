@@ -34,6 +34,10 @@ pub struct SessionCache<'r> {
 }
 
 impl<'r> SessionStorage for SessionCache<'r> {
+    fn check_compat(&self) -> PartialVMResult<bool> {
+        self.remote.get_check_compat()
+    }
+
     fn load_checksum(&self, module_id: &ModuleId) -> PartialVMResult<Checksum> {
         if let Some(checksum) = self.checksums.read().get(module_id) {
             return Ok(*checksum);

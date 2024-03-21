@@ -13,6 +13,7 @@ pub trait SessionStorage {
         &self,
         module_id: &ModuleId,
     ) -> PartialVMResult<(usize, Checksum, Arc<CompiledModule>)>;
+    fn check_compat(&self) -> PartialVMResult<bool>;
 }
 
 pub(crate) struct SessionStorageForVerify<'r> {
@@ -50,5 +51,9 @@ impl<'r> SessionStorage for SessionStorageForVerify<'r> {
         module_id: &ModuleId,
     ) -> PartialVMResult<(usize, Checksum, Arc<CompiledModule>)> {
         self.session_cache.load_module(module_id)
+    }
+
+    fn check_compat(&self) -> PartialVMResult<bool> {
+        self.session_cache.check_compat()
     }
 }

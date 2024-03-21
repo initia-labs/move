@@ -6,7 +6,7 @@ use crate::{
     config::VMConfig,
     data_cache::TransactionDataCache,
     interpreter::Interpreter,
-    loader::{Function, LoadedFunction, Loader, SessionStorageForVerify},
+    loader::{Function, LoadedFunction, Loader, SessionStorage, SessionStorageForVerify},
     native_extensions::NativeContextExtensions,
     native_functions::{NativeFunction, NativeFunctions},
     session::{LoadedFunctionInstantiation, SerializedReturnValues, Session},
@@ -92,9 +92,15 @@ impl VMRuntime {
         _gas_meter: &mut impl GasMeter,
         compat: Compatibility,
     ) -> VMResult<()> {
-        // raise error when publish request with no check without allow_arbitrary 
+        // raise error when publish request with no check without allow_arbitrary
         // vm configuration.
-        if !self.loader.vm_config.allow_arbitrary && !compat.need_check_compat() {
+        if session_cache
+            .check_compat()
+            .map_err(|e| e.finish(Location::Undefined))?
+            && !compat.need_check_compat()
+        {
+            println!("SIBONG {:?}", session_cache
+            .check_compat());
             return Err(PartialVMError::new(StatusCode::ABORTED)
                 .with_message("vm is not configured to allow arbitrary update".to_string())
                 .finish(Location::Undefined));

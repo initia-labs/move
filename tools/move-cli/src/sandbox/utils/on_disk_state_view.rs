@@ -398,6 +398,10 @@ impl ModuleResolver for OnDiskStateView {
                 .with_message(format!("Storage error: {:?}", e))
         })
     }
+
+    fn get_check_compat(&self) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
 }
 
 impl ResourceResolver for OnDiskStateView {

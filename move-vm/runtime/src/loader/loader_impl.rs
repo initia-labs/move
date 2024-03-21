@@ -1163,6 +1163,8 @@ impl Loader {
                 let module = self
                     .load_module(module_id, session_storage)
                     .map_err(|e| e.to_partial())?;
+
+                let check_compat = session_storage.check_compat()?;
                 let func = module
                     .function_map
                     .get(name)
@@ -1171,7 +1173,7 @@ impl Loader {
 
                         // if arbitrary update is enabled, we should check the dependency
                         // visibility whenever the function is used by remote module.
-                        if !self.vm_config.allow_arbitrary
+                        if check_compat
                             || self.is_function_visible(self_id, module.compiled_module(), idx)
                         {
                             Some(func)

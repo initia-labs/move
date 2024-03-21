@@ -47,6 +47,10 @@ impl ModuleResolver for BlankStorage {
     fn get_module(&self, _module_id: &ModuleId) -> Result<Option<Bytes>, Self::Error> {
         Ok(None)
     }
+
+    fn get_check_compat(&self) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
 }
 
 impl ResourceResolver for BlankStorage {
@@ -115,6 +119,10 @@ impl<'a, 'b, S: ModuleResolver> ModuleResolver for DeltaStorage<'a, 'b, S> {
 
         self.base.get_module(module_id)
     }
+
+    fn get_check_compat(&self) -> Result<bool, Self::Error> {
+        self.base.get_check_compat()
+    }
 }
 
 impl<'a, 'b, S: ResourceResolver> ResourceResolver for DeltaStorage<'a, 'b, S> {
@@ -175,6 +183,7 @@ pub struct InMemoryStorage {
     accounts: BTreeMap<AccountAddress, InMemoryAccountStorage>,
     #[cfg(feature = "table-extension")]
     tables: BTreeMap<TableHandle, BTreeMap<Vec<u8>, Bytes>>,
+    check_compat: bool
 }
 
 fn apply_changes<K, V>(
@@ -303,10 +312,15 @@ impl InMemoryStorage {
     }
 
     pub fn new() -> Self {
+        Self::new_with_check_compat(true)
+    }
+
+    pub fn new_with_check_compat(check_compat: bool) -> Self {
         Self {
             accounts: BTreeMap::new(),
             #[cfg(feature = "table-extension")]
             tables: BTreeMap::new(),
+            check_compat,
         }
     }
 
@@ -360,6 +374,10 @@ impl ModuleResolver for InMemoryStorage {
             return Ok(account_storage.modules.get(module_id.name()).cloned());
         }
         Ok(None)
+    }
+
+    fn get_check_compat(&self) -> Result<bool, Self::Error> {
+        Ok(self.check_compat)
     }
 }
 
