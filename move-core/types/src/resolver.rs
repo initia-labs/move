@@ -30,6 +30,8 @@ pub trait ModuleResolver {
     fn get_module_metadata(&self, module_id: &ModuleId) -> Vec<Metadata>;
 
     fn get_module(&self, id: &ModuleId) -> Result<Option<Bytes>, Self::Error>;
+
+    fn get_check_compat(&self) -> Result<bool, Self::Error>;
 }
 
 pub fn resource_size(resource: &Option<Bytes>) -> usize {

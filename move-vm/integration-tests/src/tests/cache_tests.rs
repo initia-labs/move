@@ -23,7 +23,7 @@ use sha3::{Digest, Sha3_256};
 const WORKING_ACCOUNT: AccountAddress = AccountAddress::TWO;
 
 fn get_test_base(config: VMConfig) -> (InMemoryStorage, Arc<MoveVM>) {
-    let data_store = InMemoryStorage::new();
+    let data_store = InMemoryStorage::new_with_check_compat(false);
     let vm = MoveVM::new_with_config(vec![], config).expect("should make move vm");
     (data_store, Arc::new(vm))
 }
@@ -117,7 +117,9 @@ fn test_update_modules(
                 .load_module_from_cache(&module_id)
                 .unwrap_or_else(|| panic!("module should exist in session cache"));
             let mut session_cache_module_bytes = vec![];
-            session_cache_module.serialize(&mut session_cache_module_bytes).unwrap();
+            session_cache_module
+                .serialize(&mut session_cache_module_bytes)
+                .unwrap();
             assert_eq!(
                 module_bytes, session_cache_module_bytes,
                 "updated module bytes should equal with bytes in session cache"
@@ -217,7 +219,6 @@ fn test_small_cache_update_module() {
 fn test_update_function(update_path: &str, cache_size: usize) -> VMResult<SerializedReturnValues> {
     let config = VMConfig {
         module_cache_capacity: cache_size,
-        allow_arbitrary: true,
         ..Default::default()
     };
 

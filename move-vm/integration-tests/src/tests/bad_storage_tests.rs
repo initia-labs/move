@@ -523,6 +523,10 @@ impl ModuleResolver for BogusStorage {
     fn get_module(&self, _module_id: &ModuleId) -> Result<Option<Bytes>, Self::Error> {
         Err(PartialVMError::new(self.bad_status_code))
     }
+
+    fn get_check_compat(&self) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
 }
 
 impl ResourceResolver for BogusStorage {
