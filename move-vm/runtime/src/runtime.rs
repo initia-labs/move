@@ -92,6 +92,14 @@ impl VMRuntime {
         _gas_meter: &mut impl GasMeter,
         compat: Compatibility,
     ) -> VMResult<()> {
+        // raise error when publish request with no check without allow_arbitrary 
+        // vm configuration.
+        if !self.loader.vm_config.allow_arbitrary && !compat.need_check_compat() {
+            return Err(PartialVMError::new(StatusCode::ABORTED)
+                .with_message("vm is not configured to allow arbitrary update".to_string())
+                .finish(Location::Undefined));
+        }
+
         // make checksum records for the publishing modules
         let mut checksums: HashMap<ModuleId, Checksum> = HashMap::new();
 

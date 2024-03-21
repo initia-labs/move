@@ -1169,31 +1169,14 @@ impl Loader {
                     .and_then(|idx| {
                         let func = module.function_defs.get(*idx).cloned()?;
 
-                        // if arbitrary update is enabled, we should check
-                        // the dependency visibility again.
-                        if self.vm_config.allow_arbitrary {
-                            let compiled_module = module.compiled_module();
-                            let def_idx = FunctionDefinitionIndex(*idx as TableIndex);
-                            let func_def = compiled_module.function_def_at(def_idx);
-                            let allowed = match func_def.visibility {
-                                Visibility::Public => true,
-                                Visibility::Friend => {
-                                    let friend_module_ids: BTreeSet<_> =
-                                        compiled_module.immediate_friends().into_iter().collect();
-                                    self_id.map_or(false, |self_id| {
-                                        friend_module_ids.contains(self_id)
-                                    })
-                                }
-                                Visibility::Private => false,
-                            };
-
-                            if allowed {
-                                Some(func)
-                            } else {
-                                None
-                            }
-                        } else {
+                        // if arbitrary update is enabled, we should check the dependency
+                        // visibility whenever the function is used by remote module.
+                        if !self.vm_config.allow_arbitrary
+                            || self.is_function_visible(self_id, module.compiled_module(), idx)
+                        {
                             Some(func)
+                        } else {
+                            None
                         }
                     })
                     .ok_or_else(|| {
@@ -1204,6 +1187,29 @@ impl Loader {
 
                 Ok(func)
             }
+        }
+    }
+
+    fn is_function_visible(
+        &self,
+        caller_module_id: Option<&ModuleId>,
+        callee_compiled_module: &CompiledModule,
+        callee_func_idx: &usize,
+    ) -> bool {
+        let def_idx = FunctionDefinitionIndex(*callee_func_idx as TableIndex);
+        let func_def = callee_compiled_module.function_def_at(def_idx);
+        match func_def.visibility {
+            Visibility::Public => true,
+            Visibility::Friend => {
+                let friend_module_ids: BTreeSet<_> = callee_compiled_module
+                    .immediate_friends()
+                    .into_iter()
+                    .collect();
+                caller_module_id.map_or(false, |caller_module_id| {
+                    friend_module_ids.contains(caller_module_id)
+                })
+            }
+            Visibility::Private => false,
         }
     }
 
