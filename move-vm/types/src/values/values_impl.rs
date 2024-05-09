@@ -1203,6 +1203,16 @@ impl Value {
         ))))
     }
 
+    /// Create a "unowned" reference to a iterator value (&iter) for populating the &iter in
+    /// execute function
+    pub fn iter_reference(iter_id: u64) -> Self {
+        Self(ValueImpl::ContainerRef(ContainerRef::Local(
+            Container::Struct(Rc::new(RefCell::new(vec![
+                ValueImpl::U64(iter_id)
+            ]))),
+        )))
+    }
+
     // API is not checking the value layout, so the caller need to be careful.
     pub fn string(s: String) -> Self {
         Value::struct_(Struct::pack(vec![Value::vector_u8(s.into_bytes())]))
