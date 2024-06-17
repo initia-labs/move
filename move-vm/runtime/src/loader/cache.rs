@@ -13,7 +13,7 @@ use move_vm_types::loaded_data::runtime_types::{
 use super::{function::Function, module::Module, script::Script};
 
 pub(crate) struct ModuleCache {
-    pub(crate) modules: HashMap<Checksum, Arc<Module>>,
+    modules: HashMap<Checksum, Arc<Module>>,
 }
 
 impl ModuleCache {
