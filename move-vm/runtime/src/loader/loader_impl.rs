@@ -140,7 +140,7 @@ impl Loader {
                 let cached = locked_script_cache.insert(checksum, script);
 
                 // create cache hits entry
-                if let Some(removed) = self.module_cache_hits.write().create(checksum) {
+                if let Some(removed) = self.script_cache_hits.write().create(checksum) {
                     self.removed_scripts.write().push(removed);
                 }
 
@@ -723,6 +723,11 @@ impl Loader {
         let checksum = module.checksum;
         let module_ref = locked_module_cache.insert(checksum, module);
 
+        // create cache hits entry
+        if let Some(removed) = self.module_cache_hits.write().create(checksum) {
+            self.removed_modules.write().push(removed);
+        }
+
         // create type cache for module
         self.type_cache.write().create_type_cache(checksum);
 
@@ -794,11 +799,6 @@ impl Loader {
         if let Some(cached) = self.module_cache.read().get(&checksum) {
             self.module_cache_hits.write().record_hit(&checksum);
             return Ok(cached);
-        }
-
-        // create cache hits entry
-        if let Some(removed) = self.module_cache_hits.write().create(checksum) {
-            self.removed_modules.write().push(removed);
         }
 
         // otherwise, load the transitive closure of the target module
