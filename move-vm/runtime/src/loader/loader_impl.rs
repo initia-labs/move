@@ -592,7 +592,10 @@ impl Loader {
                         let checksum = session_storage.load_checksum(module_id)?;
                         let locked_module_cache = self.module_cache.read();
                         match locked_module_cache.get(&checksum) {
-                            Some(m) => Some(m.compiled_module().immediate_dependencies()),
+                            Some(m) => {
+                                self.module_cache_hits.write().record_hit(&checksum);
+                                Some(m.compiled_module().immediate_dependencies())
+                            },
                             None => {
                                 // explicit drop
                                 drop(locked_module_cache);
@@ -621,7 +624,10 @@ impl Loader {
                             let checksum = session_storage.load_checksum(module_id)?;
                             let locked_module_cache = self.module_cache.read();
                             match locked_module_cache.get(&checksum) {
-                                Some(m) => Some(m.compiled_module().immediate_friends()),
+                                Some(m) => {
+                                    self.module_cache_hits.write().record_hit(&checksum);
+                                    Some(m.compiled_module().immediate_friends())
+                                },
                                 None => {
                                     // explicit drop
                                     drop(locked_module_cache);
@@ -956,7 +962,6 @@ impl Loader {
                 let loaded = match locked_cache.get(&checksum) {
                     Some(cached) => {
                         self.module_cache_hits.write().record_hit(&checksum);
-
                         cached
                     }
                     None => {
