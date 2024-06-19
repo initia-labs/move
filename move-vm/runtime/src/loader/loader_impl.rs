@@ -126,6 +126,7 @@ impl Loader {
                 cached
             }
             None => {
+                let size = script_blob.len();
                 let arc_script =
                     self.deserialize_and_verify_script(session_storage, script_blob)?;
                 let script = Script::new(
@@ -136,15 +137,21 @@ impl Loader {
                 )
                 .map_err(|e| e.finish(Location::Script))?;
 
-                // insert script to cache
-                let cached = locked_script_cache.insert(checksum, script);
+                // create cache hits entry only if not exists.
+                if !self.script_cache_hits.read().contains(&checksum) {
+                    let mut removed = self
+                        .script_cache_hits
+                        .write()
+                        .create(checksum, size)
+                        .map_err(|e: PartialVMError| e.finish(Location::Script))?;
 
-                // create cache hits entry
-                if let Some(removed) = self.script_cache_hits.write().create(checksum) {
-                    self.removed_scripts.write().push(removed);
+                    if !removed.is_empty() {
+                        self.removed_scripts.write().append(&mut removed);
+                    }
                 }
 
-                cached
+                // insert script to cache
+                locked_script_cache.insert(checksum, script)
             }
         };
 
@@ -583,7 +590,6 @@ impl Loader {
         bundle_verified: &BTreeMap<ModuleId, CompiledModule>,
         bundle_unverified: &BTreeSet<ModuleId>,
     ) -> VMResult<()> {
-        let locked_module_cache = self.module_cache.read();
         cyclic_dependencies::verify_module(
             module,
             |module_id| {
@@ -591,9 +597,21 @@ impl Loader {
                     Some(m) => Some(m.immediate_dependencies()),
                     None => {
                         let checksum = session_storage.load_checksum(module_id)?;
-                        locked_module_cache
-                            .get(&checksum)
-                            .map(|m| m.compiled_module().immediate_dependencies())
+                        let locked_module_cache = self.module_cache.read();
+                        match locked_module_cache.get(&checksum) {
+                            Some(m) => {
+                                self.module_cache_hits.write().record_hit(&checksum);
+                                Some(m.compiled_module().immediate_dependencies())
+                            }
+                            None => {
+                                // explicit drop
+                                drop(locked_module_cache);
+
+                                self.load_module(module_id, session_storage)
+                                    .map(|m| m.compiled_module().immediate_dependencies())
+                                    .ok()
+                            }
+                        }
                     }
                 }
                 .ok_or_else(|| PartialVMError::new(StatusCode::MISSING_DEPENDENCY))
@@ -611,9 +629,21 @@ impl Loader {
                         Some(m) => Some(m.immediate_friends()),
                         None => {
                             let checksum = session_storage.load_checksum(module_id)?;
-                            locked_module_cache
-                                .get(&checksum)
-                                .map(|m| m.compiled_module().immediate_friends())
+                            let locked_module_cache = self.module_cache.read();
+                            match locked_module_cache.get(&checksum) {
+                                Some(m) => {
+                                    self.module_cache_hits.write().record_hit(&checksum);
+                                    Some(m.compiled_module().immediate_friends())
+                                }
+                                None => {
+                                    // explicit drop
+                                    drop(locked_module_cache);
+
+                                    self.load_module(module_id, session_storage)
+                                        .map(|m| m.compiled_module().immediate_dependencies())
+                                        .ok()
+                                }
+                            }
                         }
                     }
                     .ok_or_else(|| PartialVMError::new(StatusCode::MISSING_DEPENDENCY))
@@ -721,14 +751,22 @@ impl Loader {
         .map_err(|e| e.finish(Location::Undefined))?;
 
         let checksum = module.checksum;
-        let module_ref = locked_module_cache.insert(checksum, module);
 
-        // create cache hits entry
-        if let Some(removed) = self.module_cache_hits.write().create(checksum) {
-            self.removed_modules.write().push(removed);
+        // create cache hits entry only if not exists.
+        if !self.module_cache_hits.read().contains(&checksum) {
+            let mut removed = self
+                .module_cache_hits
+                .write()
+                .create(checksum, size)
+                .map_err(|e: PartialVMError| e.finish(Location::Undefined))?;
+
+            if !removed.is_empty() {
+                self.removed_modules.write().append(&mut removed);
+            }
         }
 
-        // create type cache for module
+        // create cache entries for module
+        let module_ref = locked_module_cache.insert(checksum, module);
         self.type_cache.write().create_type_cache(checksum);
 
         drop(locked_module_cache); // explicit unlock
@@ -749,7 +787,7 @@ impl Loader {
         let module_cache_hits = self.module_cache_hits.read();
 
         for checksum in removed_modules.iter() {
-            if module_cache_hits.peek(checksum) {
+            if module_cache_hits.contains(checksum) {
                 continue;
             }
 
@@ -772,7 +810,7 @@ impl Loader {
         let script_cache_hits = self.script_cache_hits.read();
 
         for checksum in removed_scripts.iter() {
-            if script_cache_hits.peek(checksum) {
+            if script_cache_hits.contains(checksum) {
                 continue;
             }
 
@@ -819,6 +857,7 @@ impl Loader {
             bundle_unverified,
         )
         .map_err(expect_no_verification_errors)?;
+
         Ok(module_ref)
     }
 
@@ -936,6 +975,10 @@ impl Loader {
 
                 let locked_cache = self.module_cache.read();
                 let loaded = match locked_cache.get(&checksum) {
+                    Some(cached) => {
+                        self.module_cache_hits.write().record_hit(&checksum);
+                        cached
+                    }
                     None => {
                         drop(locked_cache); // explicit unlock
                         self.load_and_verify_module_and_dependencies(
@@ -948,7 +991,6 @@ impl Loader {
                             dependencies_depth + 1,
                         )?
                     }
-                    Some(cached) => cached,
                 };
                 cached_deps.push(loaded);
             }
