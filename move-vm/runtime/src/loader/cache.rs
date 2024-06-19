@@ -1,6 +1,6 @@
-use std::{collections::HashMap, num::NonZeroUsize, sync::Arc};
+use clru::{CLruCache, CLruCacheConfig, WeightScale};
+use std::{collections::hash_map::RandomState, collections::HashMap, num::NonZeroUsize, sync::Arc};
 
-use lru::LruCache;
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{
     identifier::Identifier, language_storage::StructTag, value::MoveTypeLayout,
@@ -206,30 +206,54 @@ pub(crate) struct StructLayoutInfoCacheItem {
     pub(crate) has_identifier_mappings: bool,
 }
 
+#[derive(Debug)]
+struct SizeScale;
+
+impl WeightScale<Checksum, usize> for SizeScale {
+    #[inline]
+    fn weight(&self, _key: &Checksum, size: &usize) -> usize {
+        *size
+    }
+}
+
 pub(crate) struct CacheHitRecords {
-    checksums: LruCache<Checksum, bool>,
+    checksums: CLruCache<Checksum, usize, RandomState, SizeScale>,
 }
 
 impl CacheHitRecords {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
-            checksums: LruCache::new(NonZeroUsize::new(capacity).unwrap()),
+            checksums: CLruCache::with_config(
+                CLruCacheConfig::new(NonZeroUsize::new(capacity).unwrap())
+                    .with_scale(SizeScale),
+            ),
         }
     }
 
-    pub(crate) fn create(&mut self, checksum: Checksum) -> Option<Checksum> {
+    pub(crate) fn create(&mut self, checksum: Checksum, size: usize) -> PartialVMResult<Vec<Checksum>> {
+        // In the current implementation, the cache uses 2x the memory bytes of the actual size.
+        // * compiled module
+        // * function codes
+        let weight = size * 2;
+
         // Pop least recently used cache item if the cache is full
-        let popped_elem = if self.checksums.len() == self.checksums.cap().into() {
-            self.checksums.pop_lru().map(|(k, _)| k)
-        } else {
-            None
-        };
+        let mut removed_checksums: Vec<Checksum> = vec![];
+        while self.checksums.len() + self.checksums.weight() + weight >= self.checksums.capacity() {
+            let (k, _) = self.checksums.pop_back().unwrap();
+            removed_checksums.push(k);
+        }
 
-        // create new hit entry
-        self.checksums.put(checksum, true);
+        let before_cache_len = self.checksums.len();
+        self.checksums.put_with_weight(checksum, weight).map_err(|e| {
+            PartialVMError::new(StatusCode::STORAGE_ERROR)
+                .with_message(format!("Failed to insert into cache: {:?}", e))
+        })?;
 
-        // return popped elem to remove from the cache
-        popped_elem
+        // put_with_weight should not remove any elements
+        debug_assert_eq!(before_cache_len + 1, self.checksums.len());
+
+        // return popped elements to remove from the cache
+        Ok(removed_checksums)
     }
 
     pub(crate) fn record_hit(&mut self, checksum: &Checksum) {
