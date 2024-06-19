@@ -260,7 +260,7 @@ impl CacheHitRecords {
         self.checksums.get(checksum);
     }
 
-    pub(crate) fn peek(&self, checksum: &Checksum) -> bool {
-        self.checksums.peek(checksum).is_some()
+    pub(crate) fn contains(&self, checksum: &Checksum) -> bool {
+        self.checksums.contains(checksum)
     }
 }

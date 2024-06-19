@@ -137,8 +137,8 @@ impl Loader {
                 )
                 .map_err(|e| e.finish(Location::Script))?;
 
-                // create cache hits entry
-                if !self.script_cache_hits.read().peek(&checksum) {
+                // create cache hits entry only if not exists.
+                if !self.script_cache_hits.read().contains(&checksum) {
                     let mut removed = self
                         .script_cache_hits
                         .write()
@@ -752,8 +752,8 @@ impl Loader {
 
         let checksum = module.checksum;
 
-        // create cache hits entry only if there is no cache hit entry.
-        if !self.module_cache_hits.read().peek(&checksum) {
+        // create cache hits entry only if not exists.
+        if !self.module_cache_hits.read().contains(&checksum) {
             let mut removed = self
                 .module_cache_hits
                 .write()
@@ -787,7 +787,7 @@ impl Loader {
         let module_cache_hits = self.module_cache_hits.read();
 
         for checksum in removed_modules.iter() {
-            if module_cache_hits.peek(checksum) {
+            if module_cache_hits.contains(checksum) {
                 continue;
             }
 
@@ -810,7 +810,7 @@ impl Loader {
         let script_cache_hits = self.script_cache_hits.read();
 
         for checksum in removed_scripts.iter() {
-            if script_cache_hits.peek(checksum) {
+            if script_cache_hits.contains(checksum) {
                 continue;
             }
 
