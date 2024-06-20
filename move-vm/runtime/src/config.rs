@@ -44,8 +44,8 @@ impl Default for VMConfig {
             type_base_cost: 0,
             type_byte_cost: 0,
             aggregator_v2_type_tagging: false,
-            module_cache_capacity: 1000,
-            script_cache_capacity: 100,
+            module_cache_capacity: 1024 * 1024 * 500, // 500MB
+            script_cache_capacity: 1024 * 1024 * 100, // 100MB
         }
     }
 }
