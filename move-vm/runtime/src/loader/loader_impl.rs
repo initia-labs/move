@@ -640,7 +640,7 @@ impl Loader {
                                     drop(locked_module_cache);
 
                                     self.load_module(module_id, session_storage)
-                                        .map(|m| m.compiled_module().immediate_dependencies())
+                                        .map(|m| m.compiled_module().immediate_friends())
                                         .ok()
                                 }
                             }
