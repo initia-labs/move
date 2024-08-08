@@ -8,4 +8,4 @@ mod extensions;
 mod storage;
 
 pub mod gas_schedule;
-pub use storage::{BlankStorage, DeltaStorage, InMemoryStorage};
+pub use storage::{BlankStorage, InMemoryStorage};

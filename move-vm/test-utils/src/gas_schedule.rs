@@ -12,7 +12,8 @@ use move_binary_format::{
     file_format::{
         Bytecode, CodeOffset, ConstantPoolIndex, FieldHandleIndex, FieldInstantiationIndex,
         FunctionHandleIndex, FunctionInstantiationIndex, SignatureIndex,
-        StructDefInstantiationIndex, StructDefinitionIndex,
+        StructDefInstantiationIndex, StructDefinitionIndex, StructVariantHandleIndex,
+        StructVariantInstantiationIndex, VariantFieldHandleIndex, VariantFieldInstantiationIndex,
     },
     file_format_common::{instruction_key, Opcodes},
 };
@@ -148,7 +149,7 @@ impl<'a> TestGasMeter for GasStatus<'a> {
         extensions: NativeContextExtensions,
         storage: &InMemoryStorage,
     ) -> VMResult<String> {
-        print_resources(changes, extensions, storage).map_err(|e| {
+        print_resources(&changes, extensions, storage).map_err(|e| {
             PartialVMError::new(StatusCode::FAILED_TO_SERIALIZE_WRITE_SET_CHANGES)
                 .with_message(e.to_string())
                 .finish(Location::Undefined)
@@ -156,14 +157,16 @@ impl<'a> TestGasMeter for GasStatus<'a> {
     }
 }
 
+/// Print the updates to storage represented by `cs` in the context of the starting storage state
+/// `storage`.
 fn print_resources(
-    cs: ChangeSet,
+    cs: &ChangeSet,
     extensions: NativeContextExtensions,
     storage: &InMemoryStorage,
 ) -> anyhow::Result<String> {
     use std::fmt::Write;
     let mut buf = String::new();
-    let annotator = MoveValueAnnotator::new(storage);
+    let annotator = MoveValueAnnotator::new(storage.clone());
     for (account_addr, account_state) in cs.accounts() {
         writeln!(&mut buf, "0x{}:", account_addr.short_str_lossless())?;
 
@@ -647,6 +650,22 @@ pub fn zero_cost_instruction_table() -> Vec<(Bytecode, GasCost)> {
             ImmBorrowFieldGeneric(FieldInstantiationIndex::new(0)),
             GasCost::new(0, 0),
         ),
+        (
+            MutBorrowVariantField(VariantFieldHandleIndex::new(0)),
+            GasCost::new(0, 0),
+        ),
+        (
+            MutBorrowVariantFieldGeneric(VariantFieldInstantiationIndex::new(0)),
+            GasCost::new(0, 0),
+        ),
+        (
+            ImmBorrowVariantField(VariantFieldHandleIndex::new(0)),
+            GasCost::new(0, 0),
+        ),
+        (
+            ImmBorrowVariantFieldGeneric(VariantFieldInstantiationIndex::new(0)),
+            GasCost::new(0, 0),
+        ),
         (Add, GasCost::new(0, 0)),
         (CopyLoc(0), GasCost::new(0, 0)),
         (StLoc(0), GasCost::new(0, 0)),
@@ -678,6 +697,14 @@ pub fn zero_cost_instruction_table() -> Vec<(Bytecode, GasCost)> {
         (Unpack(StructDefinitionIndex::new(0)), GasCost::new(0, 0)),
         (
             UnpackGeneric(StructDefInstantiationIndex::new(0)),
+            GasCost::new(0, 0),
+        ),
+        (
+            UnpackVariant(StructVariantHandleIndex::new(0)),
+            GasCost::new(0, 0),
+        ),
+        (
+            UnpackVariantGeneric(StructVariantInstantiationIndex::new(0)),
             GasCost::new(0, 0),
         ),
         (Or, GasCost::new(0, 0)),
@@ -714,6 +741,22 @@ pub fn zero_cost_instruction_table() -> Vec<(Bytecode, GasCost)> {
         (Pack(StructDefinitionIndex::new(0)), GasCost::new(0, 0)),
         (
             PackGeneric(StructDefInstantiationIndex::new(0)),
+            GasCost::new(0, 0),
+        ),
+        (
+            PackVariant(StructVariantHandleIndex::new(0)),
+            GasCost::new(0, 0),
+        ),
+        (
+            PackVariantGeneric(StructVariantInstantiationIndex::new(0)),
+            GasCost::new(0, 0),
+        ),
+        (
+            TestVariant(StructVariantHandleIndex::new(0)),
+            GasCost::new(0, 0),
+        ),
+        (
+            TestVariantGeneric(StructVariantInstantiationIndex::new(0)),
             GasCost::new(0, 0),
         ),
         (Nop, GasCost::new(0, 0)),
@@ -780,6 +823,22 @@ pub fn bytecode_instruction_costs() -> Vec<(Bytecode, GasCost)> {
             ImmBorrowFieldGeneric(FieldInstantiationIndex::new(0)),
             GasCost::new(1, 1),
         ),
+        (
+            MutBorrowVariantField(VariantFieldHandleIndex::new(0)),
+            GasCost::new(1, 1),
+        ),
+        (
+            MutBorrowVariantFieldGeneric(VariantFieldInstantiationIndex::new(0)),
+            GasCost::new(1, 1),
+        ),
+        (
+            ImmBorrowVariantField(VariantFieldHandleIndex::new(0)),
+            GasCost::new(1, 1),
+        ),
+        (
+            ImmBorrowVariantFieldGeneric(VariantFieldInstantiationIndex::new(0)),
+            GasCost::new(1, 1),
+        ),
         (Add, GasCost::new(1, 1)),
         (CopyLoc(0), GasCost::new(1, 1)),
         (StLoc(0), GasCost::new(1, 1)),
@@ -811,6 +870,14 @@ pub fn bytecode_instruction_costs() -> Vec<(Bytecode, GasCost)> {
         (Unpack(StructDefinitionIndex::new(0)), GasCost::new(2, 1)),
         (
             UnpackGeneric(StructDefInstantiationIndex::new(0)),
+            GasCost::new(2, 1),
+        ),
+        (
+            UnpackVariant(StructVariantHandleIndex::new(0)),
+            GasCost::new(2, 1),
+        ),
+        (
+            UnpackVariantGeneric(StructVariantInstantiationIndex::new(0)),
             GasCost::new(2, 1),
         ),
         (Or, GasCost::new(2, 1)),
@@ -847,6 +914,22 @@ pub fn bytecode_instruction_costs() -> Vec<(Bytecode, GasCost)> {
         (Pack(StructDefinitionIndex::new(0)), GasCost::new(2, 1)),
         (
             PackGeneric(StructDefInstantiationIndex::new(0)),
+            GasCost::new(2, 1),
+        ),
+        (
+            PackVariant(StructVariantHandleIndex::new(0)),
+            GasCost::new(2, 1),
+        ),
+        (
+            PackVariantGeneric(StructVariantInstantiationIndex::new(0)),
+            GasCost::new(2, 1),
+        ),
+        (
+            TestVariant(StructVariantHandleIndex::new(0)),
+            GasCost::new(2, 1),
+        ),
+        (
+            TestVariantGeneric(StructVariantInstantiationIndex::new(0)),
             GasCost::new(2, 1),
         ),
         (Nop, GasCost::new(1, 1)),

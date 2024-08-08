@@ -12,7 +12,7 @@ use move_core_types::{
     value::{MoveStruct, MoveValue},
     vm_status::StatusCode,
 };
-use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{module_traversal::*, move_vm::MoveVM};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas::UnmeteredGasMeter;
 
@@ -63,6 +63,7 @@ fn run(
     let mut sess = vm.new_session(&storage);
 
     let fun_name = Identifier::new("foo").unwrap();
+    let traversal_storage = TraversalStorage::new();
 
     let args: Vec<_> = args
         .into_iter()
@@ -75,6 +76,7 @@ fn run(
         ty_args,
         args,
         &mut UnmeteredGasMeter,
+        &mut TraversalContext::new(&traversal_storage),
     )?;
 
     Ok(())
@@ -161,9 +163,10 @@ fn expected_u64_got_u64() {
 #[test]
 #[allow(non_snake_case)]
 fn expected_Foo_got_Foo() {
-    expect_ok(&["Foo"], vec![MoveValue::Struct(MoveStruct::new(vec![
-        MoveValue::U64(0),
-    ]))])
+    expect_ok(
+        &["Foo"],
+        vec![MoveValue::Struct(MoveStruct::new(vec![MoveValue::U64(0)]))],
+    )
 }
 
 #[test]
@@ -173,10 +176,10 @@ fn expected_signer_ref_got_signer() {
 
 #[test]
 fn expected_u64_signer_ref_got_u64_signer() {
-    expect_ok(&["u64", "&signer"], vec![
-        MoveValue::U64(0),
-        MoveValue::Signer(TEST_ADDR),
-    ])
+    expect_ok(
+        &["u64", "&signer"],
+        vec![MoveValue::U64(0), MoveValue::Signer(TEST_ADDR)],
+    )
 }
 
 #[test]
@@ -235,17 +238,25 @@ fn expected_A_B__A_u32_vector_B_got_u16_u256__u16_u32_vector_u256() {
 #[test]
 #[allow(non_snake_case)]
 fn expected_T__Bar_T_got_bool__Bar_bool() {
-    expect_ok_generic(&["T"], &["Bar<T>"], vec![TypeTag::Bool], vec![
-        MoveValue::Struct(MoveStruct::new(vec![MoveValue::Bool(false)])),
-    ])
+    expect_ok_generic(
+        &["T"],
+        &["Bar<T>"],
+        vec![TypeTag::Bool],
+        vec![MoveValue::Struct(MoveStruct::new(vec![MoveValue::Bool(
+            false,
+        )]))],
+    )
 }
 
 #[test]
 #[allow(non_snake_case)]
 fn expected_T__T_got_bool__bool() {
-    expect_ok_generic(&["T"], &["T"], vec![TypeTag::Bool], vec![MoveValue::Bool(
-        false,
-    )])
+    expect_ok_generic(
+        &["T"],
+        &["T"],
+        vec![TypeTag::Bool],
+        vec![MoveValue::Bool(false)],
+    )
 }
 
 #[test]

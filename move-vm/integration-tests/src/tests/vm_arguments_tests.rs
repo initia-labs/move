@@ -21,7 +21,7 @@ use move_core_types::{
     value::{serialize_values, MoveValue},
     vm_status::{StatusCode, StatusType},
 };
-use move_vm_runtime::move_vm::MoveVM;
+use move_vm_runtime::{module_traversal::*, move_vm::MoveVM};
 use move_vm_test_utils::InMemoryStorage;
 use move_vm_types::gas::UnmeteredGasMeter;
 
@@ -38,7 +38,7 @@ fn make_script(parameters: Signature) -> Vec<u8> {
         None => {
             signatures.push(parameters);
             SignatureIndex((signatures.len() - 1) as TableIndex)
-        },
+        }
     };
     CompiledScript {
         version: move_binary_format::file_format_common::VERSION_MAX,
@@ -84,7 +84,7 @@ fn make_script_with_non_linking_structs(parameters: Signature) -> Vec<u8> {
         None => {
             signatures.push(parameters);
             SignatureIndex((signatures.len() - 1) as TableIndex)
-        },
+        }
     };
     CompiledScript {
         version: move_binary_format::file_format_common::VERSION_MAX,
@@ -150,14 +150,14 @@ fn make_module_with_function(
         None => {
             signatures.push(parameters);
             SignatureIndex((signatures.len() - 1) as TableIndex)
-        },
+        }
     };
     let return_idx = match signatures.iter().enumerate().find(|(_, s)| *s == &return_) {
         Some((idx, _)) => SignatureIndex(idx as TableIndex),
         None => {
             signatures.push(return_);
             SignatureIndex((signatures.len() - 1) as TableIndex)
-        },
+        }
     };
     let module = CompiledModule {
         version: move_binary_format::file_format_common::VERSION_MAX,
@@ -215,6 +215,10 @@ fn make_module_with_function(
                 code: vec![Bytecode::LdU64(0), Bytecode::Abort],
             }),
         }],
+        struct_variant_handles: vec![],
+        struct_variant_instantiations: vec![],
+        variant_field_handles: vec![],
+        variant_field_instantiations: vec![],
     };
     (module, function_name)
 }
@@ -250,12 +254,15 @@ fn call_script_with_args_ty_args_signers(
     let move_vm = MoveVM::new(vec![]).unwrap();
     let remote_view = InMemoryStorage::new();
     let mut session = move_vm.new_session(&remote_view);
+    let traversal_storage = TraversalStorage::new();
+
     session
         .execute_script(
             script,
             ty_args,
             combine_signers_and_args(signers, non_signer_args),
             &mut UnmeteredGasMeter,
+            &mut TraversalContext::new(&traversal_storage),
         )
         .map(|_| ())
 }
@@ -280,12 +287,14 @@ fn call_script_function_with_args_ty_args_signers(
 
     remote_view.publish_or_overwrite_module(module_id.clone(), module_blob);
     let mut session = move_vm.new_session(&remote_view);
+    let traversal_storage = TraversalStorage::new();
     session.execute_function_bypass_visibility(
         &module_id,
         function_name.as_ident_str(),
         ty_args,
         combine_signers_and_args(signers, non_signer_args),
         &mut UnmeteredGasMeter,
+        &mut TraversalContext::new(&traversal_storage),
     )?;
     Ok(())
 }
@@ -354,23 +363,27 @@ fn deprecated_bad_signatures() -> Vec<Signature> {
 fn good_signatures_and_arguments() -> Vec<(Signature, Vec<MoveValue>)> {
     vec![
         // U128 arg
-        (Signature(vec![SignatureToken::U128]), vec![
-            MoveValue::U128(0),
-        ]),
+        (
+            Signature(vec![SignatureToken::U128]),
+            vec![MoveValue::U128(0)],
+        ),
         // U8 arg
         (Signature(vec![SignatureToken::U8]), vec![MoveValue::U8(0)]),
         // U16 arg
-        (Signature(vec![SignatureToken::U16]), vec![MoveValue::U16(
-            0,
-        )]),
+        (
+            Signature(vec![SignatureToken::U16]),
+            vec![MoveValue::U16(0)],
+        ),
         // U32 arg
-        (Signature(vec![SignatureToken::U32]), vec![MoveValue::U32(
-            0,
-        )]),
+        (
+            Signature(vec![SignatureToken::U32]),
+            vec![MoveValue::U32(0)],
+        ),
         // U256 arg
-        (Signature(vec![SignatureToken::U256]), vec![
-            MoveValue::U256(U256::zero()),
-        ]),
+        (
+            Signature(vec![SignatureToken::U256]),
+            vec![MoveValue::U256(U256::zero())],
+        ),
         // All constants
         (
             Signature(vec![SignatureToken::Vector(Box::new(SignatureToken::Bool))]),
@@ -774,6 +787,7 @@ fn call_missing_item() {
     let move_vm = MoveVM::new(vec![]).unwrap();
     let mut remote_view = InMemoryStorage::new();
     let mut session = move_vm.new_session(&remote_view);
+    let traversal_storage = TraversalStorage::new();
     let error = session
         .execute_function_bypass_visibility(
             &module_id,
@@ -781,6 +795,7 @@ fn call_missing_item() {
             vec![],
             Vec::<Vec<u8>>::new(),
             &mut UnmeteredGasMeter,
+            &mut TraversalContext::new(&traversal_storage),
         )
         .err()
         .unwrap();
@@ -796,6 +811,7 @@ fn call_missing_item() {
     // missing function
     remote_view.publish_or_overwrite_module(module_id.clone(), module_blob);
     let mut session = move_vm.new_session(&remote_view);
+    let traversal_storage = TraversalStorage::new();
     let error = session
         .execute_function_bypass_visibility(
             &module_id,
@@ -803,6 +819,7 @@ fn call_missing_item() {
             vec![],
             Vec::<Vec<u8>>::new(),
             &mut UnmeteredGasMeter,
+            &mut TraversalContext::new(&traversal_storage),
         )
         .err()
         .unwrap();

@@ -10,7 +10,7 @@ use move_vm_types::loaded_data::runtime_types::{
     Checksum, DepthFormula, StructIdentifier, StructType, Type,
 };
 
-use super::{function::Function, module::Module, script::Script};
+use super::{module::Module, script::Script};
 
 pub(crate) struct ModuleCache {
     modules: HashMap<Checksum, Arc<Module>>,
@@ -141,35 +141,14 @@ impl ScriptCache {
         }
     }
 
-    pub(crate) fn get_main(
-        &self,
-        checksum: &Checksum,
-    ) -> Option<(Arc<Function>, Vec<Type>, Vec<Type>)> {
-        self.scripts.get(checksum).cloned().map(|script| {
-            (
-                script.entry_point(),
-                script.parameter_tys.clone(),
-                script.return_tys.clone(),
-            )
-        })
-    }
-
     pub(crate) fn get(&self, checksum: &Checksum) -> Option<Arc<Script>> {
         self.scripts.get(checksum).cloned()
     }
 
-    pub(crate) fn insert(
-        &mut self,
-        checksum: Checksum,
-        script: Script,
-    ) -> (Arc<Function>, Vec<Type>, Vec<Type>) {
+    pub(crate) fn insert(&mut self, checksum: Checksum, script: Script) -> Arc<Script> {
         let item = Arc::new(script);
         self.scripts.insert(checksum, item.clone());
-        (
-            item.entry_point(),
-            item.parameter_tys.clone(),
-            item.return_tys.clone(),
-        )
+        item
     }
 
     pub(crate) fn remove(&mut self, checksum: &Checksum) {
@@ -224,13 +203,18 @@ impl CacheHitRecords {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             checksums: CLruCache::with_config(
-                CLruCacheConfig::new(NonZeroUsize::new(capacity).unwrap())
-                    .with_scale(SizeScale),
+                CLruCacheConfig::new(NonZeroUsize::new(capacity).unwrap()).with_scale(SizeScale),
             ),
         }
     }
 
-    pub(crate) fn create(&mut self, checksum: Checksum, size: usize) -> PartialVMResult<Vec<Checksum>> {
+    // return false if there is no space to insert the module into the cache
+    // return true if the module is inserted into the cache
+    pub(crate) fn create(
+        &mut self,
+        checksum: Checksum,
+        size: usize,
+    ) -> PartialVMResult<Vec<Checksum>> {
         // In the current implementation, the cache uses 2x the memory bytes of the actual size.
         // * compiled module
         // * function codes
@@ -239,18 +223,28 @@ impl CacheHitRecords {
         // Pop least recently used cache item if the cache is full
         let mut removed_checksums: Vec<Checksum> = vec![];
         while self.checksums.len() + self.checksums.weight() + weight >= self.checksums.capacity() {
+            // if the capacity of the cache is smaller than the size of the module, we should not cache it.
+            if self.checksums.is_empty() {
+                // flag to delete this module after transaction session finished.
+                removed_checksums.push(checksum);
+                return Ok(removed_checksums);
+            }
+
             let (k, _) = self.checksums.pop_back().unwrap();
             removed_checksums.push(k);
         }
 
         let before_cache_len = self.checksums.len();
-        self.checksums.put_with_weight(checksum, weight).map_err(|e| {
-            PartialVMError::new(StatusCode::STORAGE_ERROR)
-                .with_message(format!("Failed to insert into cache: {:?}", e))
-        })?;
+        let updated = self
+            .checksums
+            .put_with_weight(checksum, weight)
+            .map_err(|e| {
+                PartialVMError::new(StatusCode::STORAGE_ERROR)
+                    .with_message(format!("Failed to insert into cache: {:?}", e))
+            })?;
 
         // put_with_weight should not remove any elements
-        debug_assert_eq!(before_cache_len + 1, self.checksums.len());
+        debug_assert!(updated.is_some() || before_cache_len + 1 == self.checksums.len());
 
         // return popped elements to remove from the cache
         Ok(removed_checksums)

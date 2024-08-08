@@ -8,8 +8,8 @@ use bytes::Bytes;
 use move_binary_format::{
     deserializer::DeserializerConfig, errors::*, file_format::CompiledScript, CompiledModule,
 };
-use move_core_types::{language_storage::ModuleId, resolver::MoveResolver, vm_status::StatusCode};
-use move_vm_types::loaded_data::runtime_types::Checksum;
+use move_core_types::{language_storage::ModuleId, vm_status::StatusCode};
+use move_vm_types::{loaded_data::runtime_types::Checksum, resolver::MoveResolver};
 use parking_lot::RwLock;
 use sha3::{Digest, Sha3_256};
 use std::{collections::btree_map::BTreeMap, sync::Arc};
@@ -17,7 +17,7 @@ use std::{collections::btree_map::BTreeMap, sync::Arc};
 /// Transaction checksum cache. Keep updates within a transaction so
 /// they can all be fetched at loader execution.
 pub struct SessionCache<'r> {
-    remote: &'r dyn MoveResolver<PartialVMError>,
+    remote: &'r dyn MoveResolver,
     deserializer_config: DeserializerConfig,
 
     // we don't need lock because it is created per session,
@@ -31,7 +31,7 @@ pub struct SessionCache<'r> {
 impl<'r> SessionStorage for SessionCache<'r> {
     fn check_compat(&self) -> PartialVMResult<bool> {
         if let Some(check_compat) = *self.check_compat.read() {
-            return Ok(check_compat)
+            return Ok(check_compat);
         }
 
         let check_compat = self.remote.get_check_compat()?;
@@ -90,10 +90,7 @@ impl<'r> SessionStorage for SessionCache<'r> {
 impl<'r> SessionCache<'r> {
     /// Create a `SessionCache` with a `RemoteCache` that provides access to data
     /// not updated in the transaction.
-    pub fn new(
-        remote: &'r impl MoveResolver<PartialVMError>,
-        deserializer_config: DeserializerConfig,
-    ) -> Self {
+    pub fn new(remote: &'r impl MoveResolver, deserializer_config: DeserializerConfig) -> Self {
         SessionCache {
             remote,
             deserializer_config,

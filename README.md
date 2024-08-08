@@ -4,7 +4,6 @@ title: Move Language
 custom_edit_url: https://github.com/initia-labs/move/edit/initia-move/README.md
 ---
 
-
 This project is forked from [Aptos Move](https://github.com/aptos-labs/aptos-core/tree/main/third_party/move) to avoid multi-standard of move language.
 
 ## How to fetch latest changes from aptos-core
@@ -26,7 +25,6 @@ cargo test \
  --package move-cli \
  --package move-unit-test \
  --package move-compiler \
- --package move-analyzer \
  --package move-stdlib \
  --package move-package \
  --package move-binary-format \

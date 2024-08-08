@@ -145,13 +145,13 @@ impl TryIntoMoveValue for DelayedFieldID {
                 // size with identifiers inside, and so it has to be deterministic.
 
                 self.into_derived_string_struct()?
-            },
+            }
             _ => {
                 return Err(code_invariant_error(format!(
                     "Failed to convert {:?} into a Move value with {} layout",
                     self, layout
                 )))
-            },
+            }
         })
     }
 }

@@ -17,7 +17,11 @@ use move_core_types::{
     account_address::AccountAddress, effects::ChangeSet, identifier::IdentStr,
     value::serialize_values, vm_status::StatusCode,
 };
-use move_vm_runtime::{move_vm::MoveVM, native_functions::NativeFunctionTable};
+use move_vm_runtime::{
+    module_traversal::{TraversalContext, TraversalStorage},
+    move_vm::MoveVM,
+    native_functions::NativeFunctionTable,
+};
 use move_vm_test_utils::{
     gas_schedule::{Gas, TestGasMeter},
     InMemoryStorage,
@@ -211,6 +215,7 @@ impl<'a, 'b, W: Write> TestOutput<'a, 'b, W> {
 }
 
 impl SharedTestingConfig {
+    #[allow(clippy::field_reassign_with_default)]
     fn execute_via_move_vm(
         &self,
         test_plan: &ModuleTestPlan,
@@ -226,12 +231,14 @@ impl SharedTestingConfig {
         // TODO: collect VM logs if the verbose flag (i.e, `self.verbose`) is set
 
         let now = Instant::now();
+        let storage = TraversalStorage::new();
         let serialized_return_values_result = session.execute_function_bypass_visibility(
             &test_plan.module_id,
             IdentStr::new(function_name).unwrap(),
             vec![], // no ty args, at least for now
             serialize_values(test_info.arguments.iter()),
             &mut gas_meter,
+            &mut TraversalContext::new(&storage),
         );
         let mut return_result = serialized_return_values_result.map(|res| {
             res.return_values
@@ -302,8 +309,12 @@ impl SharedTestingConfig {
             };
             match exec_result {
                 Err(err) => {
-                    let actual_err =
-                        MoveError(err.major_status(), err.sub_status(), err.location().clone());
+                    let actual_err = MoveError(
+                        err.major_status(),
+                        err.sub_status(),
+                        err.location().clone(),
+                        err.message().cloned(),
+                    );
                     assert!(err.major_status() != StatusCode::EXECUTED);
                     match test_info.expected_failure.as_ref() {
                         Some(ExpectedFailure::Expected) => {

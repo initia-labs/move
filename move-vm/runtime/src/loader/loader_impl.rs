@@ -1,6 +1,5 @@
 use std::{
     collections::{btree_map, BTreeMap, BTreeSet},
-    num::NonZeroUsize,
     sync::Arc,
 };
 
@@ -8,10 +7,7 @@ use lazy_static::lazy_static;
 use move_binary_format::{
     access::{ModuleAccess, ScriptAccess},
     errors::{verification_error, Location, PartialVMError, PartialVMResult, VMResult},
-    file_format::{
-        AbilitySet, CompiledScript, FunctionDefinitionIndex, StructFieldInformation, TableIndex,
-        TypeParameterIndex, Visibility,
-    },
+    file_format::{CompiledScript, StructFieldInformation, TableIndex, TypeParameterIndex},
     CompiledModule, IndexKind,
 };
 use move_bytecode_verifier::{cyclic_dependencies, dependencies};
@@ -27,7 +23,7 @@ use move_core_types::{
 use move_vm_types::{
     gas::GasMeter,
     loaded_data::runtime_types::{
-        AbilityInfo, Checksum, DepthFormula, StructIdentifier, StructType, Type,
+        Checksum, DepthFormula, StructIdentifier, StructLayout, StructType, Type, TypeBuilder,
     },
 };
 use parking_lot::{Mutex, RwLock};
@@ -36,12 +32,12 @@ use typed_arena::Arena;
 
 use crate::{
     config::VMConfig, logging::expect_no_verification_errors, module_traversal::TraversalContext,
-    native_functions::NativeFunctions, session::LoadedFunctionInstantiation,
+    native_functions::NativeFunctions,
 };
 
 use super::{
     cache::{CacheHitRecords, ModuleCache, ScriptCache, StructLayoutInfoCacheItem, TypeCache},
-    function::{Function, FunctionHandle, LoadedFunction},
+    function::{Function, LoadedFunction, LoadedFunctionOwner},
     module::Module,
     script::Script,
     SessionStorage,
@@ -52,9 +48,8 @@ const VERIFIED_CACHE_SIZE: usize = 100_000;
 
 // Cache for already verified modules
 lazy_static! {
-    static ref VERIFIED_MODULES: Mutex<lru::LruCache<[u8; 32], ()>> = Mutex::new(
-        lru::LruCache::new(NonZeroUsize::new(VERIFIED_CACHE_SIZE).unwrap())
-    );
+    static ref VERIFIED_MODULES: Mutex<lru::LruCache<[u8; 32], ()>> =
+        Mutex::new(lru::LruCache::new(VERIFIED_CACHE_SIZE));
 }
 
 // A Loader is responsible to load scripts and modules and holds the cache of all loaded
@@ -95,6 +90,10 @@ impl Loader {
         &self.vm_config
     }
 
+    pub(crate) fn ty_builder(&self) -> &TypeBuilder {
+        &self.vm_config.ty_builder
+    }
+
     //
     // Script verification and loading
     //
@@ -112,78 +111,62 @@ impl Loader {
         session_storage: &dyn SessionStorage,
         script_blob: &[u8],
         ty_args: &[TypeTag],
-    ) -> VMResult<(Arc<Function>, LoadedFunctionInstantiation)> {
+    ) -> VMResult<LoadedFunction> {
         // retrieve or load the script
         let mut sha3_256 = Sha3_256::new();
         sha3_256.update(script_blob);
         let checksum: Checksum = sha3_256.finalize().into();
 
         let mut locked_script_cache = self.script_cache.write();
-        let (main, parameters, return_) = match locked_script_cache.get_main(&checksum) {
+        let script = match locked_script_cache.get(&checksum) {
             Some(cached) => {
                 self.script_cache_hits.write().record_hit(&checksum);
-
                 cached
             }
             None => {
                 let size = script_blob.len();
                 let arc_script =
                     self.deserialize_and_verify_script(session_storage, script_blob)?;
-                let script = Script::new(
-                    arc_script,
-                    &checksum,
-                    &self.module_cache.read(),
-                    session_storage,
-                )
-                .map_err(|e| e.finish(Location::Script))?;
+                let script = Script::new(arc_script, &self.module_cache.read(), session_storage)
+                    .map_err(|e| e.finish(Location::Script))?;
 
-                // create cache hits entry only if not exists.
-                if !self.script_cache_hits.read().contains(&checksum) {
-                    let mut removed = self
-                        .script_cache_hits
-                        .write()
-                        .create(checksum, size)
-                        .map_err(|e: PartialVMError| e.finish(Location::Script))?;
+                let mut removed = self
+                    .script_cache_hits
+                    .write()
+                    .create(checksum, size)
+                    .map_err(|e: PartialVMError| e.finish(Location::Script))?;
 
-                    if !removed.is_empty() {
-                        self.removed_scripts.write().append(&mut removed);
-                    }
+                if !removed.is_empty() {
+                    self.removed_scripts.write().append(&mut removed);
                 }
 
-                // insert script to cache
+                // insert the script into the cache
                 locked_script_cache.insert(checksum, script)
             }
         };
 
-        // explicitly drop
+        // explicit unlock
         drop(locked_script_cache);
 
-        // verify type arguments
-        let mut type_arguments = vec![];
-        for ty in ty_args {
-            type_arguments.push(self.load_type(ty, session_storage)?);
-        }
+        let ty_args = ty_args
+            .iter()
+            .map(|ty| self.load_type(ty, session_storage))
+            .collect::<VMResult<Vec<_>>>()?;
 
-        if self.vm_config.type_size_limit
-            && type_arguments
-                .iter()
-                .map(|loaded_ty| self.count_type_nodes(loaded_ty))
-                .sum::<u64>()
-                > MAX_TYPE_INSTANTIATION_NODES
-        {
-            return Err(
-                PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES).finish(Location::Script)
-            );
-        };
+        let main = script.entry_point();
+        Type::verify_ty_arg_abilities(main.ty_param_abilities(), &ty_args).map_err(|e| {
+            e.with_message(format!(
+                "Failed to verify type arguments for script {}",
+                main.name()
+            ))
+            .finish(Location::Script)
+        })?;
 
-        self.verify_ty_args(main.type_parameters(), &type_arguments)
-            .map_err(|e| e.finish(Location::Script))?;
-        let instantiation = LoadedFunctionInstantiation {
-            type_arguments,
-            parameters,
-            return_,
-        };
-        Ok((main, instantiation))
+        Ok(LoadedFunction {
+            owner: LoadedFunctionOwner::Script(script),
+            ty_args,
+            function: main,
+        })
     }
 
     // The process of deserialization and verification is not and it must not be under lock.
@@ -198,19 +181,22 @@ impl Loader {
         // already checked the cache, so don't need to lookup cache
         let script = self.deserialize_script(session_storage, script_blob, false)?;
 
-        match self.verify_script(&script) {
-            Ok(_) => {
-                // verify dependencies
-                let loaded_deps = script
-                    .immediate_dependencies()
-                    .into_iter()
-                    .map(|module_id| self.load_module(&module_id, session_storage))
-                    .collect::<VMResult<_>>()?;
-                self.verify_script_dependencies(&script, loaded_deps)?;
-                Ok(script)
-            }
-            Err(err) => Err(err),
-        }
+        // Verification:
+        //   - Local, using a bytecode verifier.
+        //   - Global, loading & verifying module dependencies.
+        move_bytecode_verifier::verify_script_with_config(
+            &self.vm_config.verifier_config,
+            &script,
+        )?;
+
+        // verify dependencies
+        let loaded_deps = script
+            .immediate_dependencies()
+            .into_iter()
+            .map(|module_id| self.load_module(&module_id, session_storage))
+            .collect::<VMResult<Vec<_>>>()?;
+        dependencies::verify_script(&script, loaded_deps.iter().map(|m| m.compiled_module()))?;
+        Ok(script)
     }
 
     fn deserialize_script(
@@ -233,26 +219,6 @@ impl Loader {
         session_storage
             .deserialize_script(script_blob)
             .map_err(|e| e.finish(Location::Script))
-    }
-
-    // Script verification steps.
-    // See `verify_module()` for module verification steps.
-    fn verify_script(&self, script: &CompiledScript) -> VMResult<()> {
-        fail::fail_point!("verifier-failpoint-3", |_| { Ok(()) });
-
-        move_bytecode_verifier::verify_script_with_config(&self.vm_config.verifier, script)
-    }
-
-    fn verify_script_dependencies(
-        &self,
-        script: &CompiledScript,
-        dependencies: Vec<Arc<Module>>,
-    ) -> VMResult<()> {
-        let mut deps = vec![];
-        for dep in &dependencies {
-            deps.push(dep.compiled_module());
-        }
-        dependencies::verify_script(script, deps)
     }
 
     //
@@ -297,15 +263,12 @@ impl Loader {
         module_id: &ModuleId,
         function_name: &IdentStr,
         session_storage: &dyn SessionStorage,
-    ) -> VMResult<(Arc<Module>, Arc<Function>, Vec<Type>, Vec<Type>)> {
+    ) -> VMResult<(Arc<Module>, Arc<Function>)> {
         let module = self.load_module(module_id, session_storage)?;
         let func = module
             .resolve_function_by_name(function_name)
             .map_err(|e| e.finish(Location::Undefined))?;
-        let parameters = func.parameter_types().to_vec();
-        let return_ = func.return_types().to_vec();
-
-        Ok((module, func, parameters, return_))
+        Ok((module, func))
     }
 
     // Matches the actual returned type to the expected type, binding any type args to the
@@ -401,18 +364,17 @@ impl Loader {
         function_name: &IdentStr,
         expected_return_type: &Type,
         session_storage: &dyn SessionStorage,
-    ) -> VMResult<(LoadedFunction, LoadedFunctionInstantiation)> {
-        let (module, func, parameters, return_vec) =
+    ) -> VMResult<LoadedFunction> {
+        let (module, function) =
             self.load_function_without_type_args(module_id, function_name, session_storage)?;
 
-        if return_vec.len() != 1 {
+        if function.return_tys().len() != 1 {
             // For functions that are marked constructor this should not happen.
             return Err(PartialVMError::new(StatusCode::ABORTED).finish(Location::Undefined));
         }
-        let return_type = &return_vec[0];
 
         let mut map = BTreeMap::new();
-        if !Self::match_return_type(return_type, expected_return_type, &mut map) {
+        if !Self::match_return_type(&function.return_tys()[0], expected_return_type, &mut map) {
             // For functions that are marked constructor this should not happen.
             return Err(
                 PartialVMError::new(StatusCode::INVALID_MAIN_FUNCTION_SIGNATURE)
@@ -421,11 +383,11 @@ impl Loader {
         }
 
         // Construct the type arguments from the match
-        let mut type_arguments = vec![];
-        let type_param_len = func.type_parameters().len();
-        for i in 0..type_param_len {
-            if let Option::Some(t) = map.get(&(i as u16)) {
-                type_arguments.push((*t).clone());
+        let mut ty_args = vec![];
+        let num_ty_args = function.ty_param_abilities().len();
+        for i in 0..num_ty_args {
+            if let Some(t) = map.get(&(i as u16)) {
+                ty_args.push((*t).clone());
             } else {
                 // Unknown type argument we are not able to infer the type arguments.
                 // For functions that are marked constructor this should not happen.
@@ -436,22 +398,14 @@ impl Loader {
             }
         }
 
-        // verify type arguments for capability constraints
-        self.verify_ty_args(func.type_parameters(), &type_arguments)
+        Type::verify_ty_arg_abilities(function.ty_param_abilities(), &ty_args)
             .map_err(|e| e.finish(Location::Module(module_id.clone())))?;
 
-        let loaded = LoadedFunctionInstantiation {
-            type_arguments,
-            parameters,
-            return_: return_vec,
-        };
-        Ok((
-            LoadedFunction {
-                module,
-                function: func,
-            },
-            loaded,
-        ))
+        Ok(LoadedFunction {
+            owner: LoadedFunctionOwner::Module(module),
+            ty_args,
+            function,
+        })
     }
 
     // Entry point for function execution (`MoveVM::execute_function`).
@@ -463,32 +417,30 @@ impl Loader {
         function_name: &IdentStr,
         ty_args: &[TypeTag],
         session_storage: &dyn SessionStorage,
-    ) -> VMResult<(Arc<Module>, Arc<Function>, LoadedFunctionInstantiation)> {
-        let (module, func, parameters, return_) =
+    ) -> VMResult<LoadedFunction> {
+        let (module, function) =
             self.load_function_without_type_args(module_id, function_name, session_storage)?;
 
-        let type_arguments = ty_args
+        let ty_args = ty_args
             .iter()
-            .map(|ty| self.load_type(ty, session_storage))
+            .map(|ty_arg| self.load_type(ty_arg, session_storage))
             .collect::<VMResult<Vec<_>>>()
             .map_err(|mut err| {
-                // User provided type arguement failed to load. Set extra sub status to distinguish from internal type loading error.
+                // User provided type argument failed to load. Set extra sub status to distinguish from internal type loading error.
                 if StatusCode::TYPE_RESOLUTION_FAILURE == err.major_status() {
                     err.set_sub_status(move_core_types::vm_status::sub_status::type_resolution_failure::EUSER_TYPE_LOADING_FAILURE);
                 }
                 err
             })?;
 
-        // verify type arguments
-        self.verify_ty_args(func.type_parameters(), &type_arguments)
+        Type::verify_ty_arg_abilities(function.ty_param_abilities(), &ty_args)
             .map_err(|e| e.finish(Location::Module(module_id.clone())))?;
 
-        let loaded = LoadedFunctionInstantiation {
-            type_arguments,
-            parameters,
-            return_,
-        };
-        Ok((module, func, loaded))
+        Ok(LoadedFunction {
+            owner: LoadedFunctionOwner::Module(module),
+            ty_args,
+            function,
+        })
     }
 
     // Entry point for module publishing (`MoveVM::publish_module_bundle`).
@@ -541,7 +493,7 @@ impl Loader {
         // module will NOT show up in `module_cache`. In the module republishing case, it means
         // that the old module is still in the `module_cache`, unless a new Loader is created,
         // which means that a new MoveVM instance needs to be created.
-        move_bytecode_verifier::verify_module_with_config(&self.vm_config.verifier, module)?;
+        move_bytecode_verifier::verify_module_with_config(&self.vm_config.verifier_config, module)?;
         self.check_natives(module)?;
 
         let mut visited = BTreeSet::new();
@@ -595,24 +547,10 @@ impl Loader {
             |module_id| {
                 match bundle_verified.get(module_id) {
                     Some(m) => Some(m.immediate_dependencies()),
-                    None => {
-                        let checksum = session_storage.load_checksum(module_id)?;
-                        let locked_module_cache = self.module_cache.read();
-                        match locked_module_cache.get(&checksum) {
-                            Some(m) => {
-                                self.module_cache_hits.write().record_hit(&checksum);
-                                Some(m.compiled_module().immediate_dependencies())
-                            }
-                            None => {
-                                // explicit drop
-                                drop(locked_module_cache);
-
-                                self.load_module(module_id, session_storage)
-                                    .map(|m| m.compiled_module().immediate_dependencies())
-                                    .ok()
-                            }
-                        }
-                    }
+                    None => self
+                        .load_module(module_id, session_storage)
+                        .map(|m| m.compiled_module().immediate_dependencies())
+                        .ok(),
                 }
                 .ok_or_else(|| PartialVMError::new(StatusCode::MISSING_DEPENDENCY))
             },
@@ -627,24 +565,10 @@ impl Loader {
                     // creates a cyclic relation.
                     match bundle_verified.get(module_id) {
                         Some(m) => Some(m.immediate_friends()),
-                        None => {
-                            let checksum = session_storage.load_checksum(module_id)?;
-                            let locked_module_cache = self.module_cache.read();
-                            match locked_module_cache.get(&checksum) {
-                                Some(m) => {
-                                    self.module_cache_hits.write().record_hit(&checksum);
-                                    Some(m.compiled_module().immediate_friends())
-                                }
-                                None => {
-                                    // explicit drop
-                                    drop(locked_module_cache);
-
-                                    self.load_module(module_id, session_storage)
-                                        .map(|m| m.compiled_module().immediate_friends())
-                                        .ok()
-                                }
-                            }
-                        }
+                        None => self
+                            .load_module(module_id, session_storage)
+                            .map(|m| m.compiled_module().immediate_friends())
+                            .ok(),
                     }
                     .ok_or_else(|| PartialVMError::new(StatusCode::MISSING_DEPENDENCY))
                 }
@@ -676,51 +600,17 @@ impl Loader {
 
     pub(crate) fn load_type(
         &self,
-        type_tag: &TypeTag,
+        ty_tag: &TypeTag,
         session_storage: &dyn SessionStorage,
     ) -> VMResult<Type> {
-        Ok(match type_tag {
-            TypeTag::Bool => Type::Bool,
-            TypeTag::U8 => Type::U8,
-            TypeTag::U16 => Type::U16,
-            TypeTag::U32 => Type::U32,
-            TypeTag::U64 => Type::U64,
-            TypeTag::U128 => Type::U128,
-            TypeTag::U256 => Type::U256,
-            TypeTag::Address => Type::Address,
-            TypeTag::Signer => Type::Signer,
-            TypeTag::Vector(tt) => {
-                Type::Vector(triomphe::Arc::new(self.load_type(tt, session_storage)?))
-            }
-            TypeTag::Struct(struct_tag) => {
-                let module_id = ModuleId::new(struct_tag.address, struct_tag.module.clone());
-                let module = self.load_module(&module_id, session_storage)?;
-                let struct_type = module
-                    .get_struct_type_by_identifier(&struct_tag.name)
-                    .map_err(|e| e.finish(Location::Undefined))?;
-                if struct_type.type_parameters.is_empty() && struct_tag.type_params.is_empty() {
-                    Type::Struct {
-                        id: struct_type.id.clone(),
-                        ability: AbilityInfo::struct_(struct_type.abilities),
-                    }
-                } else {
-                    let mut type_params = vec![];
-                    for ty_param in &struct_tag.type_params {
-                        type_params.push(self.load_type(ty_param, session_storage)?);
-                    }
-                    self.verify_ty_args(struct_type.type_param_constraints(), &type_params)
-                        .map_err(|e| e.finish(Location::Undefined))?;
-                    Type::StructInstantiation {
-                        id: struct_type.id.clone(),
-                        ty_args: triomphe::Arc::new(type_params),
-                        ability: AbilityInfo::generic_struct(
-                            struct_type.abilities,
-                            struct_type.phantom_ty_args_mask.clone(),
-                        ),
-                    }
-                }
-            }
-        })
+        let resolver = |struct_tag: &StructTag| -> VMResult<Arc<StructType>> {
+            let module_id = ModuleId::new(struct_tag.address, struct_tag.module.clone());
+            let module = self.load_module(&module_id, session_storage)?;
+            module
+                .get_struct_type_by_identifier(&struct_tag.name)
+                .map_err(|e| e.finish(Location::Undefined))
+        };
+        self.ty_builder().create_ty(ty_tag, resolver)
     }
 
     // The interface for module loading. Aligned with `load_type` and `load_function`, this function
@@ -751,27 +641,23 @@ impl Loader {
         .map_err(|e| e.finish(Location::Undefined))?;
 
         let checksum = module.checksum;
+        let mut removed = self
+            .module_cache_hits
+            .write()
+            .create(checksum, size)
+            .map_err(|e: PartialVMError| e.finish(Location::Undefined))?;
 
-        // create cache hits entry only if not exists.
-        if !self.module_cache_hits.read().contains(&checksum) {
-            let mut removed = self
-                .module_cache_hits
-                .write()
-                .create(checksum, size)
-                .map_err(|e: PartialVMError| e.finish(Location::Undefined))?;
-
-            if !removed.is_empty() {
-                self.removed_modules.write().append(&mut removed);
-            }
+        if !removed.is_empty() {
+            self.removed_modules.write().append(&mut removed);
         }
 
         // create cache entries for module
-        let module_ref = locked_module_cache.insert(checksum, module);
         self.type_cache.write().create_type_cache(checksum);
+        let arc_module = locked_module_cache.insert(checksum, module);
 
         drop(locked_module_cache); // explicit unlock
 
-        Ok(module_ref)
+        Ok(arc_module)
     }
 
     // The interface to cleanup the unused modules from the cache.
@@ -883,8 +769,11 @@ impl Loader {
         }
 
         if VERIFIED_MODULES.lock().get(&checksum).is_none() {
-            move_bytecode_verifier::verify_module_with_config(&self.vm_config.verifier, &module)
-                .map_err(expect_no_verification_errors)?;
+            move_bytecode_verifier::verify_module_with_config(
+                &self.vm_config.verifier_config,
+                &module,
+            )
+            .map_err(expect_no_verification_errors)?;
 
             VERIFIED_MODULES.lock().put(checksum, ());
         }
@@ -947,7 +836,7 @@ impl Loader {
         allow_dependency_loading_failure: bool,
         dependencies_depth: usize,
     ) -> VMResult<()> {
-        if let Some(max_dependency_depth) = self.vm_config.verifier.max_dependency_depth {
+        if let Some(max_dependency_depth) = self.vm_config.verifier_config.max_dependency_depth {
             if dependencies_depth > max_dependency_depth {
                 return Err(
                     PartialVMError::new(StatusCode::MAX_DEPENDENCY_DEPTH_REACHED)
@@ -988,7 +877,7 @@ impl Loader {
                             visited,
                             friends_discovered,
                             allow_dependency_loading_failure,
-                            dependencies_depth + 1,
+                            dependencies_depth,
                         )?
                     }
                 };
@@ -1064,7 +953,7 @@ impl Loader {
         allow_friend_loading_failure: bool,
         dependencies_depth: usize,
     ) -> VMResult<()> {
-        if let Some(max_dependency_depth) = self.vm_config.verifier.max_dependency_depth {
+        if let Some(max_dependency_depth) = self.vm_config.verifier_config.max_dependency_depth {
             if dependencies_depth > max_dependency_depth {
                 return Err(
                     PartialVMError::new(StatusCode::MAX_DEPENDENCY_DEPTH_REACHED)
@@ -1124,144 +1013,33 @@ impl Loader {
         Ok(())
     }
 
-    // Return an instantiated type given a generic and an instantiation.
-    // Stopgap to avoid a recursion that is either taking too long or using too
-    // much memory
-    pub(crate) fn subst(&self, ty: &Type, ty_args: &[Type]) -> PartialVMResult<Type> {
-        // Before instantiating the type, count the # of nodes of all type arguments plus
-        // existing type instantiation.
-        // If that number is larger than MAX_TYPE_INSTANTIATION_NODES, refuse to construct this type.
-        // This prevents constructing larger and lager types via struct instantiation.
-        match ty {
-            Type::MutableReference(_) | Type::Reference(_) | Type::Vector(_) => {
-                if self.vm_config.type_size_limit
-                    && self.count_type_nodes(ty) > MAX_TYPE_INSTANTIATION_NODES
-                {
-                    return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
-                }
-            }
-            Type::StructInstantiation {
-                ty_args: struct_inst,
-                ..
-            } => {
-                let mut sum_nodes = 1u64;
-                for ty in ty_args.iter().chain(struct_inst.iter()) {
-                    sum_nodes = sum_nodes.saturating_add(self.count_type_nodes(ty));
-                    if sum_nodes > MAX_TYPE_INSTANTIATION_NODES {
-                        return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
-                    }
-                }
-            }
-            Type::Address
-            | Type::Bool
-            | Type::Signer
-            | Type::Struct { .. }
-            | Type::TyParam(_)
-            | Type::U8
-            | Type::U16
-            | Type::U32
-            | Type::U64
-            | Type::U128
-            | Type::U256 => (),
-        };
-        ty.subst(ty_args)
-    }
-
-    // Verify the kind (constraints) of an instantiation.
-    // Both function and script invocation use this function to verify correctness
-    // of type arguments provided
-    fn verify_ty_args<'a, I>(&self, constraints: I, ty_args: &[Type]) -> PartialVMResult<()>
-    where
-        I: IntoIterator<Item = &'a AbilitySet>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let constraints = constraints.into_iter();
-        if constraints.len() != ty_args.len() {
-            return Err(PartialVMError::new(
-                StatusCode::NUMBER_OF_TYPE_ARGUMENTS_MISMATCH,
-            ));
-        }
-        for (ty, expected_k) in ty_args.iter().zip(constraints) {
-            if !expected_k.is_subset(ty.abilities()?) {
-                return Err(PartialVMError::new(StatusCode::CONSTRAINT_NOT_SATISFIED));
-            }
-        }
-        Ok(())
-    }
-
     //
     // Internal helpers
     //
 
-    pub(crate) fn function_at(
+    pub(crate) fn resolve_module_and_function_by_name(
         &self,
-        self_id: Option<&ModuleId>,
-        handle: &FunctionHandle,
         session_storage: &dyn SessionStorage,
-    ) -> PartialVMResult<Arc<Function>> {
-        match handle {
-            FunctionHandle::Local(func) => Ok(func.clone()),
-            FunctionHandle::Remote { module_id, name } => {
-                let module = self
-                    .load_module(module_id, session_storage)
-                    .map_err(|e| e.to_partial())?;
+        module_id: &ModuleId,
+        func_name: &IdentStr,
+    ) -> PartialVMResult<(Arc<Module>, Arc<Function>)> {
+        let error = || {
+            PartialVMError::new(StatusCode::FUNCTION_RESOLUTION_FAILURE).with_message(format!(
+                "Cannot find {:?}::{:?} in cache",
+                module_id, func_name
+            ))
+        };
 
-                let check_compat = session_storage.check_compat()?;
-                let func = module
-                    .function_map
-                    .get(name)
-                    .and_then(|idx| {
-                        let func = module.function_defs.get(*idx).cloned()?;
-
-                        // if arbitrary update is enabled, we should check the dependency
-                        // visibility whenever the function is used by remote module.
-                        if check_compat
-                            || self.is_function_visible(self_id, module.compiled_module(), idx)
-                        {
-                            Some(func)
-                        } else {
-                            None
-                        }
-                    })
-                    .ok_or_else(|| {
-                        PartialVMError::new(StatusCode::TYPE_RESOLUTION_FAILURE).with_message(
-                            format!("Failed to resolve function: {:?}::{:?}", module_id, name),
-                        )
-                    })?;
-
-                Ok(func)
-            }
-        }
-    }
-
-    fn is_function_visible(
-        &self,
-        caller_module_id: Option<&ModuleId>,
-        callee_compiled_module: &CompiledModule,
-        callee_func_idx: &usize,
-    ) -> bool {
-        let def_idx = FunctionDefinitionIndex(*callee_func_idx as TableIndex);
-        let func_def = callee_compiled_module.function_def_at(def_idx);
-        match func_def.visibility {
-            Visibility::Public => true,
-            Visibility::Friend => {
-                let friend_module_ids: BTreeSet<_> = callee_compiled_module
-                    .immediate_friends()
-                    .into_iter()
-                    .collect();
-                caller_module_id.map_or(false, |caller_module_id| {
-                    friend_module_ids.contains(caller_module_id)
-                })
-            }
-            Visibility::Private => false,
-        }
-    }
-
-    pub(crate) fn get_script(&self, checksum: &Checksum) -> Arc<Script> {
-        self.script_cache
-            .read()
-            .get(checksum)
-            .expect("Script hash on Function must exist")
+        let module = self
+            .load_module(module_id, session_storage)
+            .map_err(|_| error())?;
+        let function = module
+            .function_map
+            .get(func_name)
+            .and_then(|idx| module.function_defs.get(*idx))
+            .cloned()
+            .ok_or_else(error)?;
+        Ok((module, function.clone()))
     }
 
     pub(crate) fn get_struct_type_by_identifier(
@@ -1356,43 +1134,6 @@ impl Loader {
         Ok(())
     }
 
-    /// Similar to `check_dependencies_and_charge_gas`, except that this does not recurse
-    /// into transitive dependencies and allows non-existent modules.
-    pub(crate) fn check_dependencies_and_charge_gas_non_recursive_optional<'a, I>(
-        &self,
-        session_storage: &dyn SessionStorage,
-        gas_meter: &mut impl GasMeter,
-        visited: &mut BTreeMap<(&'a AccountAddress, &'a IdentStr), ()>,
-        ids: I,
-    ) -> VMResult<()>
-    where
-        I: IntoIterator<Item = (&'a AccountAddress, &'a IdentStr)>,
-    {
-        for (addr, name) in ids.into_iter() {
-            // TODO: Allow the check of special addresses to be customized.
-            if !addr.is_special() && visited.insert((addr, name), ()).is_some() {
-                continue;
-            }
-
-            // Load and deserialize the module only if it has not been cached by the loader.
-            // Otherwise this will cause a significant regression in performance.
-            let module_id = ModuleId::new(*addr, name.to_owned());
-            let size = match self.load_compiled_module(&module_id, session_storage, true, true) {
-                Ok((size, _, _)) => size,
-                Err(err) if err.major_status() == StatusCode::LINKER_ERROR => continue,
-                Err(err) => return Err(err),
-            };
-
-            gas_meter
-                .charge_dependency(false, addr, name, NumBytes::new(size as u64))
-                .map_err(|err| {
-                    err.finish(Location::Module(ModuleId::new(*addr, name.to_owned())))
-                })?;
-        }
-
-        Ok(())
-    }
-
     pub(crate) fn check_script_dependencies_and_check_gas(
         &self,
         session_storage: &dyn SessionStorage,
@@ -1422,10 +1163,6 @@ pub(crate) const VALUE_DEPTH_MAX: u64 = 128;
 /// Maximal nodes which are allowed when converting to layout. This includes the the types of
 /// fields for struct types.
 pub(crate) const MAX_TYPE_TO_LAYOUT_NODES: u64 = 256;
-
-/// Maximal nodes which are all allowed when instantiating a generic type. This does not include
-/// field types of structs.
-pub(crate) const MAX_TYPE_INSTANTIATION_NODES: u64 = 128;
 
 struct PseudoGasContext {
     max_cost: u64,
@@ -1475,7 +1212,7 @@ impl Loader {
 
         let cur_cost = gas_context.cost;
 
-        let ty_arg_tags = ty_args
+        let type_args = ty_args
             .iter()
             .map(|ty| self.type_to_type_tag_impl(ty, gas_context, session_storage))
             .collect::<PartialVMResult<Vec<_>>>()?;
@@ -1483,7 +1220,7 @@ impl Loader {
             address: *id.module_id.address(),
             module: id.module_id.name().to_owned(),
             name: id.name.clone(),
-            type_params: ty_arg_tags,
+            type_args,
         };
 
         let size =
@@ -1536,31 +1273,6 @@ impl Loader {
         })
     }
 
-    pub(crate) fn count_type_nodes(&self, ty: &Type) -> u64 {
-        let mut todo = vec![ty];
-        let mut result = 0;
-        while let Some(ty) = todo.pop() {
-            match ty {
-                Type::Vector(ty) => {
-                    result += 1;
-                    todo.push(ty);
-                }
-                Type::Reference(ty) | Type::MutableReference(ty) => {
-                    result += 1;
-                    todo.push(ty);
-                }
-                Type::StructInstantiation { ty_args, .. } => {
-                    result += 1;
-                    todo.extend(ty_args.iter())
-                }
-                _ => {
-                    result += 1;
-                }
-            }
-        }
-        result
-    }
-
     fn struct_name_to_type_layout(
         &self,
         id: &StructIdentifier,
@@ -1594,48 +1306,78 @@ impl Loader {
         let count_before = *count;
         let struct_type = self.get_struct_type_by_identifier(id, session_storage)?;
 
-        // Some types can have fields which are lifted at serialization or deserialization
-        // times. Right now these are Aggregator and AggregatorSnapshot.
-        let maybe_mapping = self.get_identifier_mapping_kind(id);
+        let mut has_identifier_mappings = false;
 
-        let field_tys = struct_type
-            .fields
-            .iter()
-            .map(|ty| self.subst(ty, ty_args))
-            .collect::<PartialVMResult<Vec<_>>>()?;
-        let (mut field_layouts, field_has_identifier_mappings): (Vec<MoveTypeLayout>, Vec<bool>) =
-            field_tys
-                .iter()
-                .map(|ty| self.type_to_type_layout_impl(ty, count, depth + 1, session_storage))
-                .collect::<PartialVMResult<Vec<_>>>()?
-                .into_iter()
-                .unzip();
+        let struct_layout = match &struct_type.layout {
+            StructLayout::Single(fields) => {
+                // Some types can have fields which are lifted at serialization or deserialization
+                // times. Right now these are Aggregator and AggregatorSnapshot.
+                let maybe_mapping = self.get_identifier_mapping_kind(id);
 
-        let has_identifier_mappings =
-            maybe_mapping.is_some() || field_has_identifier_mappings.into_iter().any(|b| b);
+                let field_tys = fields
+                    .iter()
+                    .map(|(_, ty)| self.ty_builder().create_ty_with_subst(ty, ty_args))
+                    .collect::<PartialVMResult<Vec<_>>>()?;
+                let (mut field_layouts, field_has_identifier_mappings): (
+                    Vec<MoveTypeLayout>,
+                    Vec<bool>,
+                ) = field_tys
+                    .iter()
+                    .map(|ty| self.type_to_type_layout_impl(ty, count, depth, session_storage))
+                    .collect::<PartialVMResult<Vec<_>>>()?
+                    .into_iter()
+                    .unzip();
 
-        let field_node_count = *count - count_before;
-        let struct_layout = if Some(IdentifierMappingKind::DerivedString) == maybe_mapping {
-            // For DerivedString, the whole object should be lifted.
-            MoveTypeLayout::Native(
-                IdentifierMappingKind::DerivedString,
-                Box::new(MoveTypeLayout::Struct(MoveStructLayout::new(field_layouts))),
-            )
-        } else {
-            // For aggregators / snapshots, the first field should be lifted.
-            if let Some(kind) = &maybe_mapping {
-                if let Some(l) = field_layouts.first_mut() {
-                    *l = MoveTypeLayout::Native(kind.clone(), Box::new(l.clone()));
-                }
+                has_identifier_mappings =
+                    maybe_mapping.is_some() || field_has_identifier_mappings.into_iter().any(|b| b);
+
+                let layout = if Some(IdentifierMappingKind::DerivedString) == maybe_mapping {
+                    // For DerivedString, the whole object should be lifted.
+                    MoveTypeLayout::Native(
+                        IdentifierMappingKind::DerivedString,
+                        Box::new(MoveTypeLayout::Struct(MoveStructLayout::new(field_layouts))),
+                    )
+                } else {
+                    // For aggregators / snapshots, the first field should be lifted.
+                    if let Some(kind) = &maybe_mapping {
+                        if let Some(l) = field_layouts.first_mut() {
+                            *l = MoveTypeLayout::Native(kind.clone(), Box::new(l.clone()));
+                        }
+                    }
+                    MoveTypeLayout::Struct(MoveStructLayout::new(field_layouts))
+                };
+                layout
             }
-            MoveTypeLayout::Struct(MoveStructLayout::new(field_layouts))
+            StructLayout::Variants(variants) => {
+                // We do not support variants to have direct identifier mappings,
+                // but their inner types may.
+                let variant_layouts = variants
+                    .iter()
+                    .map(|variant| {
+                        variant
+                            .1
+                            .iter()
+                            .map(|(_, ty)| {
+                                let ty = self.ty_builder().create_ty_with_subst(ty, ty_args)?;
+                                let (ty, has_id_mappings) = self.type_to_type_layout_impl(
+                                    &ty,
+                                    count,
+                                    depth,
+                                    session_storage,
+                                )?;
+                                has_identifier_mappings |= has_id_mappings;
+                                Ok(ty)
+                            })
+                            .collect::<PartialVMResult<Vec<_>>>()
+                    })
+                    .collect::<PartialVMResult<Vec<_>>>()?;
+                MoveTypeLayout::Struct(MoveStructLayout::RuntimeVariants(variant_layouts))
+            }
         };
 
-        let mut locked_type_cache: parking_lot::lock_api::RwLockWriteGuard<
-            '_,
-            parking_lot::RawRwLock,
-            TypeCache,
-        > = self.type_cache.write();
+        let field_node_count = *count - count_before;
+
+        let mut locked_type_cache = self.type_cache.write();
         let info = locked_type_cache.insert_type(&checksum, id, ty_args)?;
         info.struct_layout_info = Some(StructLayoutInfoCacheItem {
             struct_layout: struct_layout.clone(),
@@ -1652,7 +1394,7 @@ impl Loader {
     // types.
     // Let's think how we can do this nicer.
     fn get_identifier_mapping_kind(&self, id: &StructIdentifier) -> Option<IdentifierMappingKind> {
-        if !self.vm_config.aggregator_v2_type_tagging {
+        if !self.vm_config.delayed_field_optimization_enabled {
             return None;
         }
 
@@ -1786,13 +1528,13 @@ impl Loader {
         drop(locked_type_cache);
 
         let struct_type = self.get_struct_type_by_identifier(id, session_storage)?;
-        if struct_type.fields.len() != struct_type.field_names.len() {
-            return Err(
-                PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR).with_message(
-                    "Field types did not match the length of field names in loaded struct"
-                        .to_owned(),
-                ),
-            );
+
+        // TODO(#13806): have annotated layouts for variants. Currently, we just return the raw
+        //   layout for them.
+        if matches!(struct_type.layout, StructLayout::Variants(_)) {
+            return self
+                .struct_name_to_type_layout(id, ty_args, count, depth, session_storage)
+                .map(|(l, _)| l);
         }
 
         let count_before = *count;
@@ -1805,18 +1547,14 @@ impl Loader {
 
         let struct_tag =
             self.struct_name_to_type_tag(id, ty_args, &mut gas_context, session_storage)?;
-        let field_layouts = struct_type
-            .field_names
+        let fields = struct_type.fields(None)?;
+
+        let field_layouts = fields
             .iter()
-            .zip(&struct_type.fields)
             .map(|(n, ty)| {
-                let ty = self.subst(ty, ty_args)?;
-                let l = self.type_to_fully_annotated_layout_impl(
-                    &ty,
-                    count,
-                    depth + 1,
-                    session_storage,
-                )?;
+                let ty = self.ty_builder().create_ty_with_subst(ty, ty_args)?;
+                let l =
+                    self.type_to_fully_annotated_layout_impl(&ty, count, depth, session_storage)?;
                 Ok(MoveFieldLayout::new(n.clone(), l))
             })
             .collect::<PartialVMResult<Vec<_>>>()?;
@@ -1840,10 +1578,20 @@ impl Loader {
         session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<MoveTypeLayout> {
         if *count > MAX_TYPE_TO_LAYOUT_NODES {
-            return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
+            return Err(
+                PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES).with_message(format!(
+                    "Number of type nodes when constructing type layout exceeded the maximum of {}",
+                    MAX_TYPE_TO_LAYOUT_NODES
+                )),
+            );
         }
         if depth > VALUE_DEPTH_MAX {
-            return Err(PartialVMError::new(StatusCode::VM_MAX_VALUE_DEPTH_REACHED));
+            return Err(
+                PartialVMError::new(StatusCode::VM_MAX_VALUE_DEPTH_REACHED).with_message(format!(
+                    "Depth of a layout exceeded the maximum of {} during construction",
+                    VALUE_DEPTH_MAX
+                )),
+            );
         }
         Ok(match ty {
             Type::Bool => MoveTypeLayout::Bool,
@@ -1858,15 +1606,19 @@ impl Loader {
             Type::Vector(ty) => MoveTypeLayout::Vector(Box::new(
                 self.type_to_fully_annotated_layout_impl(ty, count, depth + 1, session_storage)?,
             )),
-            Type::Struct { id, .. } => {
-                self.struct_name_to_fully_annotated_layout(id, &[], count, depth, session_storage)?
-            }
+            Type::Struct { id, .. } => self.struct_name_to_fully_annotated_layout(
+                id,
+                &[],
+                count,
+                depth + 1,
+                session_storage,
+            )?,
             Type::StructInstantiation { id, ty_args, .. } => self
                 .struct_name_to_fully_annotated_layout(
                     id,
                     ty_args,
                     count,
-                    depth,
+                    depth + 1,
                     session_storage,
                 )?,
             Type::Reference(_) | Type::MutableReference(_) | Type::TyParam(_) => {
@@ -1898,23 +1650,43 @@ impl Loader {
 
         let struct_type = self.get_struct_type_by_identifier(id, session_storage)?;
 
-        let formulas = struct_type
-            .fields
-            .iter()
-            .map(|field_type| self.calculate_depth_of_type(field_type, session_storage))
-            .collect::<PartialVMResult<Vec<_>>>()?;
+        let formulas = match &struct_type.layout {
+            StructLayout::Single(fields) => fields
+                .iter()
+                .map(|(_, field_ty)| self.calculate_depth_of_type(field_ty, session_storage))
+                .collect::<PartialVMResult<Vec<_>>>()?,
+            StructLayout::Variants(variants) => variants
+                .iter()
+                .flat_map(|variant| variant.1.iter().map(|(_, ty)| ty))
+                .map(|field_ty| self.calculate_depth_of_type(field_ty, session_storage))
+                .collect::<PartialVMResult<Vec<_>>>()?,
+        };
+
         let formula = DepthFormula::normalize(formulas);
         let prev = self
             .type_cache
             .write()
             .insert_depth_formula(&checksum, id, formula.clone())?;
 
-        if prev.is_some() {
+        if let Some(f) = prev {
+            // TODO: If the VM is not shared across threads, this error means that there is a
+            //       recursive type. But in case it is shared, the current implementation is not
+            //       correct because some other thread can cache depth formula before we reach
+            //       this line, and result in an invariant violation. We need to ensure correct
+            //       behavior, e.g., make the cache available per thread.
             return Err(
-                PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
-                    .with_message("Recursive type?".to_owned()),
-            );
+                    PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR).with_message(
+                        format!(
+                            "Depth formula for struct '{}' and formula {:?} (struct type: {:?}) is already cached: {:?}",
+                            id,
+                            formula,
+                            struct_type.as_ref(),
+                            f
+                        ),
+                    ),
+                );
         }
+
         Ok(formula)
     }
 

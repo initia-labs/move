@@ -9,12 +9,12 @@ use move_binary_format::{
 use move_core_types::{identifier::Identifier, language_storage::ModuleId, vm_status::StatusCode};
 use move_vm_types::loaded_data::{
     runtime_access_specifier::AccessSpecifier,
-    runtime_types::{Checksum, StructIdentifier, Type},
+    runtime_types::{StructIdentifier, Type},
 };
 
 use super::{
     cache::ModuleCache,
-    function::{Function, FunctionHandle, FunctionInstantiation, Scope},
+    function::{Function, FunctionHandle, FunctionInstantiation},
     type_loader::intern_type,
     SessionStorage,
 };
@@ -37,12 +37,6 @@ pub(crate) struct Script {
     // entry point
     main: Arc<Function>,
 
-    // parameters of main
-    pub(crate) parameter_tys: Vec<Type>,
-
-    // return values
-    pub(crate) return_tys: Vec<Type>,
-
     // a map of single-token signature indices to type
     single_signature_token_map: BTreeMap<SignatureIndex, Type>,
 }
@@ -50,7 +44,6 @@ pub(crate) struct Script {
 impl Script {
     pub(crate) fn new(
         script: Arc<CompiledScript>,
-        script_hash: &Checksum,
         module_cache: &ModuleCache,
         session_storage: &dyn SessionStorage,
     ) -> PartialVMResult<Self> {
@@ -104,12 +97,10 @@ impl Script {
             });
         }
 
-        let scope = Scope::Script(*script_hash);
-
         let code: Vec<Bytecode> = script.code.code.clone();
         let parameters = script.signature_at(script.parameters).clone();
 
-        let parameter_tys = parameters
+        let param_tys = parameters
             .0
             .iter()
             .map(|tok| intern_type(BinaryIndexedView::Script(&script), tok, &struct_names))
@@ -127,13 +118,7 @@ impl Script {
             .iter()
             .map(|tok| intern_type(BinaryIndexedView::Script(&script), tok, &struct_names))
             .collect::<PartialVMResult<Vec<_>>>()?;
-        let return_ = Signature(vec![]);
-        let return_tys = return_
-            .0
-            .iter()
-            .map(|tok| intern_type(BinaryIndexedView::Script(&script), tok, &struct_names))
-            .collect::<PartialVMResult<Vec<_>>>()?;
-        let type_parameters = script.type_parameters.clone();
+        let ty_param_abilities = script.type_parameters.clone();
         // TODO: main does not have a name. Revisit.
         let name = Identifier::new("main").unwrap();
         let (native, def_is_native) = (None, false); // Script entries cannot be native
@@ -141,15 +126,16 @@ impl Script {
             file_format_version: script.version(),
             index: FunctionDefinitionIndex(0),
             code,
-            type_parameters,
+            ty_param_abilities,
             native,
-            def_is_native,
-            def_is_friend_or_private: false,
-            scope,
+            is_native: def_is_native,
+            is_friend_or_private: false,
+            is_entry: false,
             name,
-            return_types: return_tys.clone(),
-            local_types: local_tys,
-            parameter_types: parameter_tys.clone(),
+            // Script must not return values.
+            return_tys: vec![],
+            local_tys,
+            param_tys,
             access_specifier: AccessSpecifier::Any,
         });
 
@@ -193,8 +179,6 @@ impl Script {
             function_refs,
             function_instantiations,
             main,
-            parameter_tys,
-            return_tys,
             single_signature_token_map,
         })
     }
@@ -207,8 +191,12 @@ impl Script {
         &self.function_refs[idx as usize]
     }
 
-    pub(crate) fn function_instantiation_at(&self, idx: u16) -> &FunctionInstantiation {
-        &self.function_instantiations[idx as usize]
+    pub(crate) fn function_instantiation_handle_at(&self, idx: u16) -> &FunctionHandle {
+        &self.function_instantiations[idx as usize].handle
+    }
+
+    pub(crate) fn function_instantiation_at(&self, idx: u16) -> &[Type] {
+        &self.function_instantiations[idx as usize].instantiation
     }
 
     pub(crate) fn single_type_at(&self, idx: SignatureIndex) -> &Type {

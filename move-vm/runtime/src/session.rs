@@ -9,10 +9,7 @@ use crate::{
 };
 use bytes::Bytes;
 use move_binary_format::{
-    compatibility::Compatibility,
-    errors::*,
-    file_format::{AbilitySet, LocalIndex},
-    CompiledModule,
+    compatibility::Compatibility, errors::*, file_format::LocalIndex, CompiledModule,
 };
 use move_core_types::{
     account_address::AccountAddress,
@@ -22,10 +19,11 @@ use move_core_types::{
     language_storage::{ModuleId, TypeTag},
     metadata::Metadata,
     value::MoveTypeLayout,
+    vm_status::StatusCode,
 };
 use move_vm_types::{
     gas::GasMeter,
-    loaded_data::runtime_types::{Checksum, StructIdentifier, StructType, Type},
+    loaded_data::runtime_types::{Checksum, StructIdentifier, StructType, Type, TypeBuilder},
     values::{GlobalValue, Value},
 };
 use std::{borrow::Borrow, sync::Arc};
@@ -49,54 +47,44 @@ pub struct SerializedReturnValues {
 }
 
 impl<'r, 'l> Session<'r, 'l> {
-    /// Execute a Move function with the given arguments. This is mainly designed for an external
-    /// environment to invoke system logic written in Move.
+    /// Execute a Move entry function.
     ///
-    /// NOTE: There are NO checks on the `args` except that they can deserialize into the provided
-    /// types.
-    /// The ability to deserialize `args` into arbitrary types is *very* powerful, e.g. it can
-    /// used to manufacture `signer`'s or `Coin`'s from raw bytes. It is the responsibility of the
-    /// caller (e.g. adapter) to ensure that this power is used responsibly/securely for its
-    /// use-case.
-    ///
-    /// The caller MUST ensure
-    ///   - All types and modules referred to by the type arguments exist.
-    ///   - The signature is valid for the rules of the adapter
-    ///
-    /// The Move VM MUST return an invariant violation if the caller fails to follow any of the
-    /// rules above.
-    ///
-    /// The VM will check that the function is marked as an 'entry' function.
-    ///
-    /// Currently if any other error occurs during execution, the Move VM will simply propagate that
-    /// error back to the outer environment without handling/translating it. This behavior may be
-    /// revised in the future.
-    ///
-    /// In case an invariant violation occurs, the whole Session should be considered corrupted and
-    /// one shall not proceed with effect generation.
+    /// NOTE: There are NO checks on the `args` except that they can deserialize
+    /// into the provided types. The ability to deserialize `args` into arbitrary
+    /// types is *very* powerful, e.g., it can be used to manufacture `signer`s
+    /// or `Coin`s from raw bytes. It is the responsibility of the caller to ensure
+    /// that this power is used responsibly/securely for its use-case.
     pub fn execute_entry_function(
         &mut self,
-        module: &ModuleId,
-        function_name: &IdentStr,
-        ty_args: Vec<TypeTag>,
+        func: LoadedFunction,
         args: Vec<impl Borrow<[u8]>>,
         gas_meter: &mut impl GasMeter,
-    ) -> VMResult<SerializedReturnValues> {
-        let bypass_declared_entry_check = false;
-        self.runtime.execute_function(
-            module,
-            function_name,
-            ty_args,
+        traversal_context: &mut TraversalContext,
+    ) -> VMResult<()> {
+        if !func.is_entry() {
+            let module_id = func
+                .module_id()
+                .cloned()
+                .expect("Entry function always has module id");
+            return Err(PartialVMError::new(
+                StatusCode::EXECUTE_ENTRY_FUNCTION_CALLED_ON_NON_ENTRY_FUNCTION,
+            )
+            .finish(Location::Module(module_id)));
+        }
+
+        self.runtime.execute_function_instantiation(
+            func,
             args,
             &mut self.data_cache,
             &self.session_cache,
             gas_meter,
+            traversal_context,
             &mut self.native_extensions,
-            bypass_declared_entry_check,
-        )
+        )?;
+        Ok(())
     }
 
-    /// Similar to execute_entry_function, but it bypasses visibility checks
+    /// Execute a Move function ignoring its visibility and whether it is entry or not.
     pub fn execute_function_bypass_visibility(
         &mut self,
         module: &ModuleId,
@@ -104,37 +92,41 @@ impl<'r, 'l> Session<'r, 'l> {
         ty_args: Vec<TypeTag>,
         args: Vec<impl Borrow<[u8]>>,
         gas_meter: &mut impl GasMeter,
+        traversal_context: &mut TraversalContext,
     ) -> VMResult<SerializedReturnValues> {
-        let bypass_declared_entry_check = true;
-        self.runtime.execute_function(
+        let func = self.runtime.loader.load_function(
             module,
             function_name,
-            ty_args,
+            &ty_args,
+            &self.session_cache,
+        )?;
+
+        self.runtime.execute_function_instantiation(
+            func,
             args,
             &mut self.data_cache,
             &self.session_cache,
             gas_meter,
+            traversal_context,
             &mut self.native_extensions,
-            bypass_declared_entry_check,
         )
     }
 
-    pub fn execute_instantiated_function(
+    pub fn execute_loaded_function(
         &mut self,
         func: LoadedFunction,
-        instantiation: LoadedFunctionInstantiation,
         args: Vec<impl Borrow<[u8]>>,
         gas_meter: &mut impl GasMeter,
+        traversal_context: &mut TraversalContext,
     ) -> VMResult<SerializedReturnValues> {
         self.runtime.execute_function_instantiation(
             func,
-            instantiation,
             args,
             &mut self.data_cache,
             &self.session_cache,
             gas_meter,
+            traversal_context,
             &mut self.native_extensions,
-            true,
         )
     }
 
@@ -160,7 +152,8 @@ impl<'r, 'l> Session<'r, 'l> {
         ty_args: Vec<TypeTag>,
         args: Vec<impl Borrow<[u8]>>,
         gas_meter: &mut impl GasMeter,
-    ) -> VMResult<SerializedReturnValues> {
+        traversal_context: &mut TraversalContext,
+    ) -> VMResult<()> {
         self.runtime.execute_script(
             script,
             ty_args,
@@ -168,6 +161,7 @@ impl<'r, 'l> Session<'r, 'l> {
             &mut self.data_cache,
             &self.session_cache,
             gas_meter,
+            traversal_context,
             &mut self.native_extensions,
         )
     }
@@ -358,30 +352,11 @@ impl<'r, 'l> Session<'r, 'l> {
     pub fn load_script(
         &mut self,
         script: impl Borrow<[u8]>,
-        ty_args: Vec<TypeTag>,
-    ) -> VMResult<LoadedFunctionInstantiation> {
-        let (_, instantiation) =
-            self.runtime
-                .loader
-                .load_script(&self.session_cache, script.borrow(), &ty_args)?;
-        Ok(instantiation)
-    }
-
-    /// Note: Cannot return a `Function` struct here due to its `pub(crate)` visibility.
-    pub fn load_function_def_is_friend_or_private(
-        &mut self,
-        module_id: &ModuleId,
-        function_name: &IdentStr,
-        type_arguments: &[TypeTag],
-    ) -> VMResult<bool> {
-        let (_, func, _) = self.runtime.loader.load_function(
-            module_id,
-            function_name,
-            type_arguments,
-            &self.session_cache,
-        )?;
-
-        Ok(func.is_friend_or_private())
+        ty_args: &[TypeTag],
+    ) -> VMResult<LoadedFunction> {
+        self.runtime
+            .loader
+            .load_script(&self.session_cache, script.borrow(), ty_args)
     }
 
     /// Load a module, a function, and all of its types into cache
@@ -390,14 +365,13 @@ impl<'r, 'l> Session<'r, 'l> {
         module_id: &ModuleId,
         function_name: &IdentStr,
         expected_return_type: &Type,
-    ) -> VMResult<(LoadedFunction, LoadedFunctionInstantiation)> {
-        let (func, instantiation) = self.runtime.loader.load_function_with_type_arg_inference(
+    ) -> VMResult<LoadedFunction> {
+        self.runtime.loader.load_function_with_type_arg_inference(
             module_id,
             function_name,
             expected_return_type,
             &self.session_cache,
-        )?;
-        Ok((func, instantiation))
+        )
     }
 
     /// Load a module, a function, and all of its types into cache
@@ -405,15 +379,11 @@ impl<'r, 'l> Session<'r, 'l> {
         &mut self,
         module_id: &ModuleId,
         function_name: &IdentStr,
-        type_arguments: &[TypeTag],
-    ) -> VMResult<LoadedFunctionInstantiation> {
-        let (_, _, instantiation) = self.runtime.loader.load_function(
-            module_id,
-            function_name,
-            type_arguments,
-            &self.session_cache,
-        )?;
-        Ok(instantiation)
+        ty_args: &[TypeTag],
+    ) -> VMResult<LoadedFunction> {
+        self.runtime
+            .loader
+            .load_function(module_id, function_name, ty_args, &self.session_cache)
     }
 
     pub fn load_type(&self, type_tag: &TypeTag) -> VMResult<Type> {
@@ -433,11 +403,6 @@ impl<'r, 'l> Session<'r, 'l> {
             .map_err(|e| e.finish(Location::Undefined))
     }
 
-    /// Gets the abilities for this type, at it's particular instantiation
-    pub fn get_type_abilities(&self, ty: &Type) -> VMResult<AbilitySet> {
-        ty.abilities().map_err(|e| e.finish(Location::Undefined))
-    }
-
     /// Gets the underlying native extensions.
     pub fn get_native_extensions(&mut self) -> &mut NativeContextExtensions<'r> {
         &mut self.native_extensions
@@ -449,6 +414,10 @@ impl<'r, 'l> Session<'r, 'l> {
 
     pub fn get_vm_config(&self) -> &'l VMConfig {
         &self.runtime.loader.vm_config
+    }
+
+    pub fn get_ty_builder(&self) -> &'l TypeBuilder {
+        self.runtime.loader.ty_builder()
     }
 
     pub fn get_struct_type(&self, id: &StructIdentifier) -> Option<Arc<StructType>> {
@@ -518,25 +487,6 @@ impl<'r, 'l> Session<'r, 'l> {
         )
     }
 
-    pub fn check_dependencies_and_charge_gas_non_recursive_optional<'a, I>(
-        &mut self,
-        gas_meter: &mut impl GasMeter,
-        traversal_context: &mut TraversalContext<'a>,
-        ids: I,
-    ) -> VMResult<()>
-    where
-        I: IntoIterator<Item = (&'a AccountAddress, &'a IdentStr)>,
-    {
-        self.runtime
-            .loader
-            .check_dependencies_and_charge_gas_non_recursive_optional(
-                &self.session_cache,
-                gas_meter,
-                &mut traversal_context.visited,
-                ids,
-            )
-    }
-
     pub fn check_script_dependencies_and_check_gas(
         &mut self,
         gas_meter: &mut impl GasMeter,
@@ -550,10 +500,4 @@ impl<'r, 'l> Session<'r, 'l> {
             script.borrow(),
         )
     }
-}
-
-pub struct LoadedFunctionInstantiation {
-    pub type_arguments: Vec<Type>,
-    pub parameters: Vec<Type>,
-    pub return_: Vec<Type>,
 }

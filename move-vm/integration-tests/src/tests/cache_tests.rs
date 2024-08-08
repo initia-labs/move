@@ -11,6 +11,7 @@ use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::ModuleId;
 use move_core_types::value::{MoveTypeLayout, MoveValue};
 use move_core_types::vm_status::StatusCode;
+use move_vm_runtime::module_traversal::{TraversalContext, TraversalStorage};
 use move_vm_runtime::session::SerializedReturnValues;
 use move_vm_runtime::{config::VMConfig, move_vm::MoveVM};
 use move_vm_test_utils::InMemoryStorage;
@@ -235,6 +236,7 @@ fn test_update_function(update_path: &str, cache_size: usize) -> VMResult<Serial
     let module_id = ModuleId::new(WORKING_ACCOUNT, Identifier::new("A").unwrap());
     let fun_name = Identifier::new("get").unwrap();
     let args = vec![MoveValue::U64(10), MoveValue::U64(20)];
+    let traversal_storage = TraversalStorage::new();
 
     let args: Vec<_> = args
         .into_iter()
@@ -247,6 +249,7 @@ fn test_update_function(update_path: &str, cache_size: usize) -> VMResult<Serial
         vec![],
         args,
         &mut UnmeteredGasMeter,
+        &mut TraversalContext::new(&traversal_storage),
     )
 }
 
@@ -255,7 +258,7 @@ fn test_normal_function_update_module_1() {
     let SerializedReturnValues {
         return_values,
         mutable_reference_outputs: _,
-    } = test_update_function("src/tests/cache_test_modules/plus_update.move", 1)
+    } = test_update_function("src/tests/cache_test_modules/plus_update.move", 1 * 1024)
         .expect("should run get function");
 
     let mut values: Vec<Vec<u8>> = return_values
@@ -280,7 +283,7 @@ fn test_normal_function_update_module_100() {
     let SerializedReturnValues {
         return_values,
         mutable_reference_outputs: _,
-    } = test_update_function("src/tests/cache_test_modules/plus_update.move", 100)
+    } = test_update_function("src/tests/cache_test_modules/plus_update.move", 100 * 1024)
         .expect("should run get function");
 
     let mut values: Vec<Vec<u8>> = return_values
@@ -304,22 +307,11 @@ fn test_normal_function_update_module_100() {
 fn test_deleted_function_update_module() {
     let err = test_update_function(
         "src/tests/cache_test_modules/plus_update_delete_function.move",
-        100,
+        100 * 1024,
     )
     .unwrap_err();
 
-    assert_eq!(err.major_status(), StatusCode::TYPE_RESOLUTION_FAILURE);
-}
-
-#[test]
-fn test_private_function_update_module() {
-    let err = test_update_function(
-        "src/tests/cache_test_modules/plus_update_private_function.move",
-        100,
-    )
-    .unwrap_err();
-
-    assert_eq!(err.major_status(), StatusCode::TYPE_RESOLUTION_FAILURE);
+    assert_eq!(err.major_status(), StatusCode::FUNCTION_RESOLUTION_FAILURE);
 }
 
 fn test_new_loader_after_update_function(
@@ -346,6 +338,7 @@ fn test_new_loader_after_update_function(
     let module_id = ModuleId::new(WORKING_ACCOUNT, Identifier::new("A").unwrap());
     let fun_name = Identifier::new("get").unwrap();
     let args = vec![MoveValue::U64(10), MoveValue::U64(20)];
+    let traversal_storage = TraversalStorage::new();
 
     let args: Vec<_> = args
         .into_iter()
@@ -358,6 +351,7 @@ fn test_new_loader_after_update_function(
         vec![],
         args,
         &mut UnmeteredGasMeter,
+        &mut TraversalContext::new(&traversal_storage),
     )
 }
 

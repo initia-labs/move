@@ -6,17 +6,24 @@ use move_binary_format::{
     file_format::{
         Constant, ConstantPoolIndex, FieldHandleIndex, FieldInstantiationIndex,
         FunctionHandleIndex, FunctionInstantiationIndex, SignatureIndex,
-        StructDefInstantiationIndex, StructDefinitionIndex,
+        StructDefInstantiationIndex, StructDefinitionIndex, StructVariantHandleIndex,
+        StructVariantInstantiationIndex, VariantFieldHandleIndex, VariantFieldInstantiationIndex,
+        VariantIndex,
     },
 };
-use move_core_types::{gas_algebra::NumTypeNodes, value::MoveTypeLayout, vm_status::StatusCode};
+use move_core_types::{
+    gas_algebra::NumTypeNodes, identifier::IdentStr, language_storage::ModuleId,
+    value::MoveTypeLayout, vm_status::StatusCode,
+};
 use move_vm_types::{
     gas::GasMeter,
     loaded_data::runtime_types::{AbilityInfo, StructType, Type},
 };
 
 use super::{
-    function::Function, loader_impl::MAX_TYPE_INSTANTIATION_NODES, module::Module, script::Script,
+    function::{FunctionHandle, LoadedFunction, LoadedFunctionOwner},
+    module::{Module, StructVariantInfo, VariantFieldInfo},
+    script::Script,
     Loader, SessionStorage,
 };
 
@@ -55,38 +62,99 @@ impl<'a> Resolver<'a> {
             BinaryType::Script(script) => script.script.constant_at(idx),
         }
     }
+}
 
+macro_rules! build_loaded_function {
+    ($function_name:ident, $idx_ty:ty, $get_function_handle:ident) => {
+        pub(crate) fn $function_name(
+            &self,
+            idx: $idx_ty,
+            verified_ty_args: Vec<Type>,
+            session_storage: &dyn SessionStorage,
+        ) -> PartialVMResult<LoadedFunction> {
+            let (owner, function) = match &self.binary {
+                BinaryType::Module(module) => {
+                    let handle = module.$get_function_handle(idx.0);
+                    match handle {
+                        FunctionHandle::Local(function) => (
+                            LoadedFunctionOwner::Module(module.clone()),
+                            function.clone(),
+                        ),
+                        FunctionHandle::Remote { module_id, name } => {
+                            let (module, function) =
+                                self.loader().resolve_module_and_function_by_name(
+                                    session_storage,
+                                    module_id,
+                                    name,
+                                )?;
+                            (LoadedFunctionOwner::Module(module), function)
+                        }
+                    }
+                }
+                BinaryType::Script(script) => {
+                    let handle = script.$get_function_handle(idx.0);
+                    match handle {
+                        FunctionHandle::Local(_) => {
+                            return Err(PartialVMError::new(
+                                StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR,
+                            )
+                            .with_message("Scripts never have local functions".to_string()));
+                        }
+                        FunctionHandle::Remote { module_id, name } => {
+                            let (module, function) =
+                                self.loader().resolve_module_and_function_by_name(
+                                    session_storage,
+                                    module_id,
+                                    name,
+                                )?;
+                            (LoadedFunctionOwner::Module(module), function)
+                        }
+                    }
+                }
+            };
+            Ok(LoadedFunction {
+                owner,
+                ty_args: verified_ty_args,
+                function,
+            })
+        }
+    };
+}
+
+impl<'a> Resolver<'a> {
     //
     // Function resolution
     //
 
-    pub(crate) fn function_from_handle(
+    build_loaded_function!(
+        build_loaded_function_from_handle_and_ty_args,
+        FunctionHandleIndex,
+        function_at
+    );
+
+    build_loaded_function!(
+        build_loaded_function_from_instantiation_and_ty_args,
+        FunctionInstantiationIndex,
+        function_instantiation_handle_at
+    );
+
+    pub(crate) fn build_loaded_function_from_name_and_ty_args(
         &self,
-        idx: FunctionHandleIndex,
         session_storage: &dyn SessionStorage,
-    ) -> PartialVMResult<Arc<Function>> {
-        let (self_id, idx) = match &self.binary {
-            BinaryType::Module(module) => (Some(&module.id), module.function_at(idx.0)),
-            BinaryType::Script(script) => (None, script.function_at(idx.0)),
-        };
-
-        self.loader.function_at(self_id, idx, session_storage)
-    }
-
-    pub(crate) fn function_from_instantiation(
-        &self,
-        idx: FunctionInstantiationIndex,
-        session_storage: &dyn SessionStorage,
-    ) -> PartialVMResult<Arc<Function>> {
-        let (self_id, func_inst) = match &self.binary {
-            BinaryType::Module(module) => {
-                (Some(&module.id), module.function_instantiation_at(idx.0))
-            }
-            BinaryType::Script(script) => (None, script.function_instantiation_at(idx.0)),
-        };
-
-        self.loader
-            .function_at(self_id, &func_inst.handle, session_storage)
+        module_id: &ModuleId,
+        function_name: &IdentStr,
+        verified_ty_args: Vec<Type>,
+    ) -> PartialVMResult<LoadedFunction> {
+        let (module, function) = self.loader.resolve_module_and_function_by_name(
+            session_storage,
+            module_id,
+            function_name,
+        )?;
+        Ok(LoadedFunction {
+            owner: LoadedFunctionOwner::Module(module),
+            ty_args: verified_ty_args,
+            function,
+        })
     }
 
     pub(crate) fn instantiate_generic_function(
@@ -95,59 +163,59 @@ impl<'a> Resolver<'a> {
         idx: FunctionInstantiationIndex,
         ty_args: &[Type],
     ) -> PartialVMResult<Vec<Type>> {
-        let func_inst = match &self.binary {
+        let instantiation = match &self.binary {
             BinaryType::Module(module) => module.function_instantiation_at(idx.0),
             BinaryType::Script(script) => script.function_instantiation_at(idx.0),
         };
 
         if let Some(gas_meter) = gas_meter {
-            for ty in &func_inst.instantiation {
+            for ty in instantiation {
                 gas_meter
                     .charge_create_ty(NumTypeNodes::new(ty.num_nodes_in_subst(ty_args)? as u64))?;
             }
         }
 
-        let mut instantiation = vec![];
-        for ty in &func_inst.instantiation {
-            instantiation.push(self.subst(ty, ty_args)?);
-        }
-        // Check if the function instantiation over all generics is larger
-        // than MAX_TYPE_INSTANTIATION_NODES.
-        let mut sum_nodes = 1u64;
-        for ty in ty_args.iter().chain(instantiation.iter()) {
-            sum_nodes = sum_nodes.saturating_add(self.loader.count_type_nodes(ty));
-            if sum_nodes > MAX_TYPE_INSTANTIATION_NODES {
-                return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
-            }
-        }
+        let ty_builder = self.loader().ty_builder();
+        let instantiation = instantiation
+            .iter()
+            .map(|ty| ty_builder.create_ty_with_subst(ty, ty_args))
+            .collect::<PartialVMResult<Vec<_>>>()?;
         Ok(instantiation)
-    }
-
-    #[allow(unused)]
-    pub(crate) fn type_params_count(&self, idx: FunctionInstantiationIndex) -> usize {
-        let func_inst = match &self.binary {
-            BinaryType::Module(module) => module.function_instantiation_at(idx.0),
-            BinaryType::Script(script) => script.function_instantiation_at(idx.0),
-        };
-        func_inst.instantiation.len()
     }
 
     //
     // Type resolution
     //
 
-    pub(crate) fn get_struct_type(&self, idx: StructDefinitionIndex) -> PartialVMResult<Type> {
-        let struct_def = match &self.binary {
+    pub(crate) fn get_struct_ty(&self, idx: StructDefinitionIndex) -> Type {
+        let struct_ty = match &self.binary {
             BinaryType::Module(module) => module.struct_at(idx),
             BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
         };
-        Ok(Type::Struct {
-            id: struct_def.id.clone(),
-            ability: AbilityInfo::struct_(struct_def.abilities),
-        })
+        self.create_struct_ty(&struct_ty)
     }
 
-    pub(crate) fn get_struct_type_generic(
+    pub(crate) fn get_struct_variant_at(
+        &self,
+        idx: StructVariantHandleIndex,
+    ) -> &StructVariantInfo {
+        match &self.binary {
+            BinaryType::Module(module) => module.struct_variant_at(idx),
+            BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
+        }
+    }
+
+    pub(crate) fn get_struct_variant_instantiation_at(
+        &self,
+        idx: StructVariantInstantiationIndex,
+    ) -> &StructVariantInfo {
+        match &self.binary {
+            BinaryType::Module(module) => module.struct_variant_instantiation_at(idx),
+            BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
+        }
+    }
+
+    pub(crate) fn get_generic_struct_ty(
         &self,
         idx: StructDefInstantiationIndex,
         ty_args: &[Type],
@@ -157,47 +225,22 @@ impl<'a> Resolver<'a> {
             BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
         };
 
-        // Before instantiating the type, count the # of nodes of all type arguments plus
-        // existing type instantiation.
-        // If that number is larger than MAX_TYPE_INSTANTIATION_NODES, refuse to construct this type.
-        // This prevents constructing larger and larger types via struct instantiation.
-        let mut sum_nodes = 1u64;
-        for ty in ty_args.iter().chain(struct_inst.instantiation.iter()) {
-            sum_nodes = sum_nodes.saturating_add(self.loader.count_type_nodes(ty));
-            if sum_nodes > MAX_TYPE_INSTANTIATION_NODES {
-                return Err(PartialVMError::new(StatusCode::TOO_MANY_TYPE_NODES));
-            }
-        }
-
-        let struct_ = &struct_inst.definition_struct_type;
-        Ok(Type::StructInstantiation {
-            id: struct_.id.clone(),
-            ty_args: triomphe::Arc::new(
-                struct_inst
-                    .instantiation
-                    .iter()
-                    .map(|ty| self.subst(ty, ty_args))
-                    .collect::<PartialVMResult<_>>()?,
-            ),
-            ability: AbilityInfo::generic_struct(
-                struct_.abilities,
-                struct_.phantom_ty_args_mask.clone(),
-            ),
-        })
+        let struct_ty = &struct_inst.definition_struct_type;
+        let ty_builder = self.loader().ty_builder();
+        ty_builder.create_struct_instantiation_ty(struct_ty, &struct_inst.instantiation, ty_args)
     }
 
-    pub(crate) fn get_field_type(&self, idx: FieldHandleIndex) -> PartialVMResult<Type> {
+    pub(crate) fn get_field_ty(&self, idx: FieldHandleIndex) -> PartialVMResult<&Type> {
         match &self.binary {
             BinaryType::Module(module) => {
                 let handle = &module.field_handles[idx.0 as usize];
-
-                Ok(handle.definition_struct_type.fields[handle.offset].clone())
+                Ok(&handle.field_ty)
             }
             BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
         }
     }
 
-    pub(crate) fn get_field_type_generic(
+    pub(crate) fn get_generic_field_ty(
         &self,
         idx: FieldInstantiationIndex,
         ty_args: &[Type],
@@ -206,19 +249,42 @@ impl<'a> Resolver<'a> {
             BinaryType::Module(module) => &module.field_instantiations[idx.0 as usize],
             BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
         };
-
-        let instantiation_types = field_instantiation
-            .instantiation
-            .iter()
-            .map(|inst_ty| inst_ty.subst(ty_args))
-            .collect::<PartialVMResult<Vec<_>>>()?;
-
-        // TODO: Is this type substitution unbounded?
-        field_instantiation.definition_struct_type.fields[field_instantiation.offset]
-            .subst(&instantiation_types)
+        let field_ty = &field_instantiation.uninstantiated_field_ty;
+        self.instantiate_ty(field_ty, ty_args, &field_instantiation.instantiation)
     }
 
-    pub(crate) fn get_struct_fields(
+    pub(crate) fn instantiate_ty(
+        &self,
+        ty: &Type,
+        ty_args: &[Type],
+        instantiation_tys: &[Type],
+    ) -> PartialVMResult<Type> {
+        let ty_builder = self.loader().ty_builder();
+        let instantiation_tys = instantiation_tys
+            .iter()
+            .map(|inst_ty| ty_builder.create_ty_with_subst(inst_ty, ty_args))
+            .collect::<PartialVMResult<Vec<_>>>()?;
+        ty_builder.create_ty_with_subst(ty, &instantiation_tys)
+    }
+
+    pub(crate) fn variant_field_info_at(&self, idx: VariantFieldHandleIndex) -> &VariantFieldInfo {
+        match &self.binary {
+            BinaryType::Module(module) => module.variant_field_info_at(idx),
+            BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
+        }
+    }
+
+    pub(crate) fn variant_field_instantiation_info_at(
+        &self,
+        idx: VariantFieldInstantiationIndex,
+    ) -> &VariantFieldInfo {
+        match &self.binary {
+            BinaryType::Module(module) => module.variant_field_instantiation_info_at(idx),
+            BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
+        }
+    }
+
+    pub(crate) fn get_struct(
         &self,
         idx: StructDefinitionIndex,
     ) -> PartialVMResult<Arc<StructType>> {
@@ -237,17 +303,45 @@ impl<'a> Resolver<'a> {
             BinaryType::Module(module) => module.struct_instantiation_at(idx.0),
             BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
         };
-        let struct_type = &struct_inst.definition_struct_type;
+        let struct_ty = &struct_inst.definition_struct_type;
+        self.instantiate_generic_fields(struct_ty, None, &struct_inst.instantiation, ty_args)
+    }
 
-        let instantiation_types = struct_inst
-            .instantiation
+    pub(crate) fn instantiate_generic_struct_variant_fields(
+        &self,
+        idx: StructVariantInstantiationIndex,
+        ty_args: &[Type],
+    ) -> PartialVMResult<Vec<Type>> {
+        let struct_inst = match &self.binary {
+            BinaryType::Module(module) => module.struct_variant_instantiation_at(idx),
+            BinaryType::Script(_) => unreachable!("Scripts cannot have type instructions"),
+        };
+        let struct_ty = &struct_inst.definition_struct_type;
+        self.instantiate_generic_fields(
+            struct_ty,
+            Some(struct_inst.variant),
+            &struct_inst.instantiation,
+            ty_args,
+        )
+    }
+
+    pub(crate) fn instantiate_generic_fields(
+        &self,
+        struct_ty: &Arc<StructType>,
+        variant: Option<VariantIndex>,
+        instantiation: &[Type],
+        ty_args: &[Type],
+    ) -> PartialVMResult<Vec<Type>> {
+        let ty_builder = self.loader().ty_builder();
+        let instantiation_tys = instantiation
             .iter()
-            .map(|inst_ty| inst_ty.subst(ty_args))
+            .map(|inst_ty| ty_builder.create_ty_with_subst(inst_ty, ty_args))
             .collect::<PartialVMResult<Vec<_>>>()?;
-        struct_type
-            .fields
+
+        struct_ty
+            .fields(variant)?
             .iter()
-            .map(|ty| ty.subst(&instantiation_types))
+            .map(|(_, inst_ty)| ty_builder.create_ty_with_subst(inst_ty, &instantiation_tys))
             .collect::<PartialVMResult<Vec<_>>>()
     }
 
@@ -264,16 +358,17 @@ impl<'a> Resolver<'a> {
         ty_args: &[Type],
     ) -> PartialVMResult<Type> {
         let ty = self.single_type_at(idx);
+
         if !ty_args.is_empty() {
-            self.subst(ty, ty_args)
+            self.loader().ty_builder().create_ty_with_subst(ty, ty_args)
         } else {
             Ok(ty.clone())
         }
     }
 
-    pub(crate) fn subst(&self, ty: &Type, ty_args: &[Type]) -> PartialVMResult<Type> {
-        self.loader.subst(ty, ty_args)
-    }
+    //
+    // Fields resolution
+    //
 
     //
     // Fields resolution
@@ -307,14 +402,13 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    pub(crate) fn field_handle_to_struct(&self, idx: FieldHandleIndex) -> PartialVMResult<Type> {
+    pub(crate) fn field_handle_to_struct(&self, idx: FieldHandleIndex) -> Type {
         match &self.binary {
             BinaryType::Module(module) => {
-                let struct_ = &module.field_handles[idx.0 as usize].definition_struct_type;
-                Ok(Type::Struct {
-                    id: struct_.id.clone(),
-                    ability: AbilityInfo::struct_(struct_.abilities),
-                })
+                let struct_ty = &module.field_handles[idx.0 as usize].definition_struct_type;
+                self.loader()
+                    .ty_builder()
+                    .create_struct_ty(struct_ty.id(), AbilityInfo::struct_(struct_ty.abilities))
             }
             BinaryType::Script(_) => unreachable!("Scripts cannot have field instructions"),
         }
@@ -323,30 +417,34 @@ impl<'a> Resolver<'a> {
     pub(crate) fn field_instantiation_to_struct(
         &self,
         idx: FieldInstantiationIndex,
-        args: &[Type],
+        ty_args: &[Type],
     ) -> PartialVMResult<Type> {
         match &self.binary {
             BinaryType::Module(module) => {
                 let field_inst = &module.field_instantiations[idx.0 as usize];
-                let struct_ = &field_inst.definition_struct_type;
-
-                Ok(Type::StructInstantiation {
-                    id: struct_.id.clone(),
-                    ty_args: triomphe::Arc::new(
-                        field_inst
-                            .instantiation
-                            .iter()
-                            .map(|ty| ty.subst(args))
-                            .collect::<PartialVMResult<Vec<_>>>()?,
-                    ),
-                    ability: AbilityInfo::generic_struct(
-                        struct_.abilities,
-                        struct_.phantom_ty_args_mask.clone(),
-                    ),
-                })
+                let struct_ty = &field_inst.definition_struct_type;
+                let ty_params = &field_inst.instantiation;
+                self.create_struct_instantiation_ty(struct_ty, ty_params, ty_args)
             }
             BinaryType::Script(_) => unreachable!("Scripts cannot have field instructions"),
         }
+    }
+
+    pub(crate) fn create_struct_ty(&self, struct_ty: &Arc<StructType>) -> Type {
+        self.loader()
+            .ty_builder()
+            .create_struct_ty(struct_ty.id(), AbilityInfo::struct_(struct_ty.abilities))
+    }
+
+    pub(crate) fn create_struct_instantiation_ty(
+        &self,
+        struct_ty: &Arc<StructType>,
+        ty_params: &[Type],
+        ty_args: &[Type],
+    ) -> PartialVMResult<Type> {
+        self.loader()
+            .ty_builder()
+            .create_struct_instantiation_ty(struct_ty, ty_params, ty_args)
     }
 
     pub(crate) fn type_to_type_layout(
@@ -375,7 +473,6 @@ impl<'a> Resolver<'a> {
             .type_to_fully_annotated_layout(ty, session_storage)
     }
 
-    // get the loader
     pub(crate) fn loader(&self) -> &Loader {
         self.loader
     }

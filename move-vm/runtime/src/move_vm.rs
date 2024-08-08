@@ -6,23 +6,28 @@ use crate::{
     config::VMConfig, native_extensions::NativeContextExtensions, native_functions::NativeFunction,
     runtime::VMRuntime, session::Session, session_cache::SessionCache,
 };
-use move_binary_format::errors::{Location, PartialVMError, VMResult};
+use move_binary_format::errors::{Location, VMResult};
 use move_core_types::{
     account_address::AccountAddress, identifier::Identifier, language_storage::TypeTag,
-    resolver::MoveResolver, value::MoveTypeLayout,
+    value::MoveTypeLayout,
 };
+use move_vm_types::resolver::MoveResolver;
 
 pub struct MoveVM {
     pub(crate) runtime: VMRuntime,
 }
 
 impl MoveVM {
+    /// Creates a new VM instance, using default configurations. Panics if there are duplicated
+    /// natives.
     pub fn new(
         natives: impl IntoIterator<Item = (AccountAddress, Identifier, Identifier, NativeFunction)>,
     ) -> VMResult<Self> {
         Self::new_with_config(natives, VMConfig::default())
     }
 
+    /// Creates a new VM instance, with provided VM configurations. Panics if there are duplicated
+    /// natives.
     pub fn new_with_config(
         natives: impl IntoIterator<Item = (AccountAddress, Identifier, Identifier, NativeFunction)>,
         vm_config: VMConfig,
@@ -31,6 +36,11 @@ impl MoveVM {
             runtime: VMRuntime::new(natives, vm_config)
                 .map_err(|err| err.finish(Location::Undefined))?,
         })
+    }
+
+    /// Returns VM configuration used to initialize the VM.
+    pub fn vm_config(&self) -> &VMConfig {
+        self.runtime.loader.vm_config()
     }
 
     /// Create a new Session backed by the given storage.
@@ -47,17 +57,14 @@ impl MoveVM {
     ///     cases where this may not be necessary, with the most notable one being the common module
     ///     publishing flow: you can keep using the same Move VM if you publish some modules in a Session
     ///     and apply the effects to the storage when the Session ends.
-    pub fn new_session<'r>(
-        &self,
-        remote: &'r impl MoveResolver<PartialVMError>,
-    ) -> Session<'r, '_> {
+    pub fn new_session<'r>(&self, remote: &'r impl MoveResolver) -> Session<'r, '_> {
         self.runtime.new_session(remote)
     }
 
     /// Create a new session, as in `new_session`, but provide native context extensions.
     pub fn new_session_with_extensions<'r>(
         &self,
-        remote: &'r impl MoveResolver<PartialVMError>,
+        remote: &'r impl MoveResolver,
         native_extensions: NativeContextExtensions<'r>,
     ) -> Session<'r, '_> {
         self.runtime

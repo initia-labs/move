@@ -3,8 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    data_cache::TransactionDataCache, interpreter::Interpreter, loader::Resolver,
-    native_extensions::NativeContextExtensions, session_cache::SessionCache,
+    data_cache::TransactionDataCache,
+    interpreter::Interpreter,
+    loader::{Function, Resolver},
+    module_traversal::TraversalContext,
+    native_extensions::NativeContextExtensions,
+    session_cache::SessionCache,
 };
 use move_binary_format::errors::{
     ExecutionState, Location, PartialVMError, PartialVMResult, VMResult,
@@ -13,7 +17,7 @@ use move_core_types::{
     account_address::AccountAddress,
     gas_algebra::{InternalGas, NumBytes},
     identifier::Identifier,
-    language_storage::TypeTag,
+    language_storage::{ModuleId, TypeTag},
     value::MoveTypeLayout,
     vm_status::StatusCode,
 };
@@ -96,28 +100,31 @@ impl NativeFunctions {
 pub struct NativeContext<'a, 'b, 'c, 'd> {
     interpreter: &'a mut Interpreter,
     data_store: &'a mut TransactionDataCache<'c>,
-    checksum_store: &'a SessionCache<'d>,
+    session_cache: &'a SessionCache<'d>,
     resolver: &'a Resolver<'a>,
     extensions: &'a mut NativeContextExtensions<'b>,
     gas_balance: InternalGas,
+    traversal_context: &'a TraversalContext<'a>,
 }
 
 impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
     pub(crate) fn new(
         interpreter: &'a mut Interpreter,
         data_store: &'a mut TransactionDataCache<'c>,
-        checksum_store: &'a SessionCache<'d>,
+        session_cache: &'a SessionCache<'d>,
         resolver: &'a Resolver<'a>,
         extensions: &'a mut NativeContextExtensions<'b>,
         gas_balance: InternalGas,
+        traversal_context: &'a TraversalContext<'a>,
     ) -> Self {
         Self {
             interpreter,
             data_store,
-            checksum_store,
+            session_cache,
             resolver,
             extensions,
             gas_balance,
+            traversal_context,
         }
     }
 }
@@ -125,7 +132,7 @@ impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
 impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
     pub fn print_stack_trace<B: Write>(&self, buf: &mut B) -> PartialVMResult<()> {
         self.interpreter
-            .debug_print_stack_trace(buf, self.resolver.loader(), self.checksum_store)
+            .debug_print_stack_trace(buf, self.resolver.loader(), self.session_cache)
     }
 
     pub fn exists_at(
@@ -135,7 +142,7 @@ impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
     ) -> VMResult<(bool, Option<NumBytes>)> {
         let (value, num_bytes) = self
             .data_store
-            .load_resource(self.resolver.loader(), self.checksum_store, address, type_)
+            .load_resource(self.resolver.loader(), self.session_cache, address, type_)
             .map_err(|err| err.finish(Location::Undefined))?;
         let exists = value
             .exists()
@@ -146,11 +153,11 @@ impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
     pub fn type_to_type_tag(&self, ty: &Type) -> PartialVMResult<TypeTag> {
         self.resolver
             .loader()
-            .type_to_type_tag(ty, self.checksum_store)
+            .type_to_type_tag(ty, self.session_cache)
     }
 
     pub fn type_to_type_layout(&self, ty: &Type) -> PartialVMResult<MoveTypeLayout> {
-        self.resolver.type_to_type_layout(ty, self.checksum_store)
+        self.resolver.type_to_type_layout(ty, self.session_cache)
     }
 
     pub fn type_to_type_layout_with_identifier_mappings(
@@ -158,12 +165,12 @@ impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
         ty: &Type,
     ) -> PartialVMResult<(MoveTypeLayout, bool)> {
         self.resolver
-            .type_to_type_layout_with_identifier_mappings(ty, self.checksum_store)
+            .type_to_type_layout_with_identifier_mappings(ty, self.session_cache)
     }
 
     pub fn type_to_fully_annotated_layout(&self, ty: &Type) -> PartialVMResult<MoveTypeLayout> {
         self.resolver
-            .type_to_fully_annotated_layout(ty, self.checksum_store)
+            .type_to_fully_annotated_layout(ty, self.session_cache)
     }
 
     pub fn extensions(&self) -> &NativeContextExtensions<'b> {
@@ -182,5 +189,35 @@ impl<'a, 'b, 'c, 'd> NativeContext<'a, 'b, 'c, 'd> {
 
     pub fn gas_balance(&self) -> InternalGas {
         self.gas_balance
+    }
+
+    pub fn traversal_context(&self) -> &TraversalContext {
+        self.traversal_context
+    }
+
+    pub fn load_function(
+        &mut self,
+        module: &ModuleId,
+        function_name: &Identifier,
+    ) -> PartialVMResult<Arc<Function>> {
+        // Load the module that contains this function regardless of the traversal context.
+        //
+        // This is just a precautionary step to make sure that caching status of the VM will not alter execution
+        // result in case framework code forgot to use LoadFunction result to load the modules into cache
+        // and charge properly.
+        self.resolver
+            .loader()
+            .load_module(module, self.session_cache)
+            .map_err(|_| {
+                PartialVMError::new(StatusCode::FUNCTION_RESOLUTION_FAILURE)
+                    .with_message(format!("Module {} doesn't exist", module))
+            })?;
+
+        let (_, function) = self.resolver.loader().resolve_module_and_function_by_name(
+            self.session_cache,
+            module,
+            function_name,
+        )?;
+        Ok(function)
     }
 }

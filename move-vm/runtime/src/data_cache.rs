@@ -11,12 +11,12 @@ use move_core_types::{
     gas_algebra::NumBytes,
     identifier::Identifier,
     language_storage::{ModuleId, TypeTag},
-    resolver::MoveResolver,
     value::MoveTypeLayout,
     vm_status::StatusCode,
 };
 use move_vm_types::{
     loaded_data::runtime_types::Type,
+    resolver::MoveResolver,
     value_serde::deserialize_and_allow_delayed_values,
     values::{GlobalValue, Value},
 };
@@ -51,15 +51,15 @@ impl AccountDataCache {
 /// The Move VM takes a `DataStore` in input and this is the default and correct implementation
 /// for a data store related to a transaction. Clients should create an instance of this type
 /// and pass it to the Move VM.
-pub struct TransactionDataCache<'r> {
-    remote: &'r dyn MoveResolver<PartialVMError>,
+pub(crate) struct TransactionDataCache<'r> {
+    remote: &'r dyn MoveResolver,
     account_map: BTreeMap<AccountAddress, AccountDataCache>,
 }
 
 impl<'r> TransactionDataCache<'r> {
     /// Create a `TransactionDataCache` with a `RemoteCache` that provides access to data
     /// not updated in the transaction.
-    pub(crate) fn new(remote: &'r impl MoveResolver<PartialVMError>) -> Self {
+    pub(crate) fn new(remote: &'r impl MoveResolver) -> Self {
         TransactionDataCache {
             remote,
             account_map: BTreeMap::new(),
