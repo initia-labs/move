@@ -37,11 +37,11 @@ pub struct RuntimeEnvironment {
     /// All registered native functions in the current context (binary). When a verified [Module]
     /// is constructed, existing native functions are inlined in the module representation, so that
     /// the interpreter can call them directly.
-    natives: NativeFunctions,
+    natives: Arc<NativeFunctions>,
 
     /// Map from struct names to indices, to save on unnecessary cloning and reduce memory
     /// consumption. Used by all struct type creations in the VM and in code cache.
-    struct_name_index_map: StructNameIndexMap,
+    struct_name_index_map: Arc<StructNameIndexMap>,
 
     /// Type cache for struct layouts, tags and depths, shared across multiple threads.
     ///
@@ -84,8 +84,8 @@ impl RuntimeEnvironment {
             .unwrap_or_else(|e| panic!("Failed to create native functions: {}", e));
         Self {
             vm_config,
-            natives,
-            struct_name_index_map: StructNameIndexMap::empty(),
+            natives: Arc::new(natives),
+            struct_name_index_map: Arc::new(StructNameIndexMap::empty()),
             ty_cache: StructInfoCache::empty(),
         }
     }
@@ -267,14 +267,14 @@ impl RuntimeEnvironment {
 }
 
 impl Clone for RuntimeEnvironment {
-    /// Returns the cloned environment. Struct re-indexing map and type caches are cloned and no
-    /// longer shared with the original environment.
+    /// Returns the cloned environment. Struct name index map is shared, but
+    /// the type cache is created empty.
     fn clone(&self) -> Self {
         Self {
             vm_config: self.vm_config.clone(),
             natives: self.natives.clone(),
             struct_name_index_map: self.struct_name_index_map.clone(),
-            ty_cache: self.ty_cache.clone(),
+            ty_cache: StructInfoCache::empty(),
         }
     }
 }
