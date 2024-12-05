@@ -64,7 +64,7 @@ impl<'v> Executor<'v> {
         &self.storage_backend
     }
 
-    /// Return a reference to the in-memory representation of the account at the specified adress if one exists.
+    /// Return a reference to the in-memory representation of the account at the specified address if one exists.
     fn account_info(&self, address: H160) -> Option<&MemoryAccount> {
         self.storage_backend.state().get(&address)
     }

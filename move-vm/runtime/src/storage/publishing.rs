@@ -82,7 +82,7 @@ pub struct StagingModuleStorage<'a, M: 'a> {
 }
 
 impl<'a, M: ModuleStorage> StagingModuleStorage<'a, M> {
-    /// Returns new module storage with staged modules, running full compatability checks for them.
+    /// Returns new module storage with staged modules, running full compatibility checks for them.
     pub fn create(
         sender: &AccountAddress,
         existing_module_storage: &'a M,

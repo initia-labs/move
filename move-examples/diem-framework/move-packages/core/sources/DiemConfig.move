@@ -104,7 +104,7 @@ module CoreFramework::DiemConfig {
         // This is OK because:
         // - The time changes in every non-empty block
         // - A block automatically ends after a transaction that emits a reconfiguration event, which is guaranteed by
-        //   DiemVM spec that all transactions comming after a reconfiguration transaction will be returned as Retry
+        //   DiemVM spec that all transactions coming after a reconfiguration transaction will be returned as Retry
         //   status.
         // - Each transaction must emit at most one reconfiguration event
         //

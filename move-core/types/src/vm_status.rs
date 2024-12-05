@@ -47,7 +47,7 @@ pub static EXECUTION_STATUS_MAX_CODE: u64 = 4999;
 /// A `VMStatus` is represented as either
 /// - `Executed` indicating successful execution
 /// - `Error` indicating an error from the VM itself
-/// - `MoveAbort` indicating an `abort` ocurred inside of a Move program
+/// - `MoveAbort` indicating an `abort` occurred inside of a Move program
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
