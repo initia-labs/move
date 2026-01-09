@@ -6,7 +6,9 @@ use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{
     function::MoveFunctionLayout,
     language_storage::StructTag,
-    value::{IdentifierMappingKind, MoveFieldLayout, MoveStructLayout, MoveTypeLayout},
+    value::{
+        IdentifierMappingKind, MoveFieldLayout, MoveStructLayout, MoveTypeLayout, MoveVariantLayout,
+    },
     vm_status::StatusCode,
 };
 use move_vm_metrics::{Timer, VM_TIMER};
@@ -345,12 +347,31 @@ pub(crate) trait LayoutConverterBase {
     ) -> PartialVMResult<MoveTypeLayout> {
         let struct_type = self.fetch_struct_ty_by_idx(struct_name_idx)?;
 
-        // TODO(#13806): have annotated layouts for variants. Currently, we just return the raw
-        //   layout for them.
-        if matches!(struct_type.layout, StructLayout::Variants(_)) {
-            return self
-                .struct_name_to_type_layout(struct_name_idx, ty_args, count, depth)
-                .map(|(l, _)| l);
+        if let StructLayout::Variants(variants) = &struct_type.layout {
+            let variant_layouts = variants
+                .iter()
+                .map(|(variant_name, fields)| {
+                    let field_layouts = fields
+                        .iter()
+                        .map(|(field_name, ty)| {
+                            let ty = self
+                                .vm_config()
+                                .ty_builder
+                                .create_ty_with_subst(ty, ty_args)?;
+                            let l = self.type_to_fully_annotated_layout_impl(&ty, count, depth)?;
+                            Ok(MoveFieldLayout::new(field_name.clone(), l))
+                        })
+                        .collect::<PartialVMResult<Vec<_>>>()?;
+                    Ok(MoveVariantLayout {
+                        name: variant_name.clone(),
+                        fields: field_layouts,
+                    })
+                })
+                .collect::<PartialVMResult<Vec<_>>>()?;
+
+            let struct_layout =
+                MoveTypeLayout::Struct(MoveStructLayout::with_variants(variant_layouts));
+            return Ok(struct_layout);
         }
 
         let struct_tag = self.struct_name_idx_to_struct_tag(struct_name_idx, ty_args)?;
