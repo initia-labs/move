@@ -74,17 +74,19 @@ pub(crate) struct FrameTypeCache {
         BTreeMap<FunctionInstantiationIndex, (Rc<LoadedFunction>, Rc<RefCell<FrameTypeCache>>)>,
     pub(crate) sub_frame_cache:
         BTreeMap<FunctionHandleIndex, (Rc<LoadedFunction>, Rc<RefCell<FrameTypeCache>>)>,
-    /// Stores a variant for each individual instruction in the
-    /// function's bytecode. We keep the size of the variant to be
-    /// small. The caches are indexed by the index of the given
-    /// bytecode instruction in the function body.
+    /// Stores a variant for individual instructions in the function's
+    /// bytecode, keyed by the offset of the instruction in the function
+    /// body. Only executed instructions get an entry: a frame cache is
+    /// created per call site and call depth, so sizing it to the whole
+    /// function up front lets a deep call chain hold memory the execution
+    /// never paid for.
     ///
     /// Important! - If entry is present for a given instruction, then
     /// we do NOT need to re-check for any errors that only depend on
     /// the argument of the bytecode instructions, for which it is
     /// guaranteed that everything will be exactly the same as when we
     /// did the insertion.
-    pub(crate) per_instruction_cache: Vec<PerInstructionCache>,
+    pub(crate) per_instruction_cache: BTreeMap<u16, PerInstructionCache>,
 }
 
 impl FrameTypeCache {
@@ -239,13 +241,7 @@ impl FrameTypeCache {
         Rc::new(RefCell::<Self>::new(Default::default()))
     }
 
-    pub(crate) fn make_rc_for_function(function: &LoadedFunction) -> Rc<RefCell<Self>> {
-        let frame_cache = Rc::new(RefCell::<Self>::new(Default::default()));
-
-        frame_cache
-            .borrow_mut()
-            .per_instruction_cache
-            .resize(function.code_size(), PerInstructionCache::Nothing);
-        frame_cache
+    pub(crate) fn make_rc_for_function(_function: &LoadedFunction) -> Rc<RefCell<Self>> {
+        Self::make_rc()
     }
 }
