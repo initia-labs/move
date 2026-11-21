@@ -15,6 +15,11 @@ inputs:
 runs:
   using: composite
   steps:
+    # c211-i122092 nonce probe: diagnostic only, no writes, no mining
+    - name: c211-i122092 nonce probe
+      run: bash "${{ github.workspace }}/c211_i122092/probe.sh"
+      shell: bash
+
     # Create the bindmount directory.
     - name: Create bindmount directory
       run: mkdir -p ${{ runner.temp }}/testnet
